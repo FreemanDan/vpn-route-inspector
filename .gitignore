@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+
+# Native host build output (local release binary)
+native-host/.build/
+native-host/.manual-build/
+
+# Local generated Native Messaging manifests (installed per-machine)
+**/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json
+
+# Extension ID files (machine-specific)
+.extension-id
+extension-id.txt
+*.extension-id
+
+# Logs and diagnostics
+*.log
+logs/
+
+# Cursor local indexes
+.cursor/index/
+.cursor/cache/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.#*
+
+# Editor swap files
+*.swp
+*.swo

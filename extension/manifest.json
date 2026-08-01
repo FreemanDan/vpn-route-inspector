@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "VPN Route Inspector",
+  "version": "0.1.0",
+  "description": "Local diagnostic tool for macOS split-tunnel VPN route inspection.",
+  "permissions": [
+    "nativeMessaging"
+  ],
+  "action": {
+    "default_title": "VPN Route Inspector",
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}

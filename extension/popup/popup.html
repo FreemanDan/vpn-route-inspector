@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VPN Route Inspector</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1 class="title">VPN Route Inspector</h1>
+      <p class="subtitle">Check which macOS interface routes an IPv4 address.</p>
+    </header>
+
+    <section class="form-section">
+      <label class="label" for="ip-input">IPv4 address</label>
+      <input
+        id="ip-input"
+        class="input"
+        type="text"
+        value="1.1.1.1"
+        placeholder="1.1.1.1"
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <button id="check-btn" class="btn" type="button">Check route</button>
+    </section>
+
+    <section id="status" class="status hidden" aria-live="polite"></section>
+    <section id="result" class="result hidden" aria-live="polite"></section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+---
+description: Durable project rules for VPN Route Inspector
+globs:
+alwaysApply: true
+---
+
+# VPN Route Inspector — Project Rules
+
+## Technology stack
+
+- **Native host:** Swift only, Swift Package Manager, Apple system libraries.
+- **Extension:** plain JavaScript, HTML, CSS — Manifest V3.
+- **No Python** as an application runtime dependency.
+- **No Node.js** runtime, npm, bundlers, or frontend frameworks.
+- **No Homebrew** dependencies for core functionality.
+
+## Native host security
+
+- Validate **all** input from Chrome before executing anything.
+- Never construct shell commands from user or extension input.
+- Execute `/sbin/route` only via `Process` with discrete argument array `["-n", "get", ip]`.
+- Never use `/bin/sh -c`, `/bin/zsh -c`, `system()`, or equivalent shell invocation.
+- **stdout** is reserved exclusively for Chrome Native Messaging framed JSON.
+- All logs and diagnostics go to **stderr**.
+
+## Secrets and local paths
+
+- Do not store secrets, credentials, cookies, or browsing history.
+- Do not commit generated extension IDs or `.extension-id` files.
+- Do not commit machine-specific absolute paths (e.g. `/Users/admin/...`).
+- Do not commit installed Native Messaging manifests under `~/Library/`.
+
+## Chrome extension permissions
+
+- Minimize permissions for each milestone.
+- Do **not** add `<all_urls>` or `webRequest` until active-tab request capture actually requires them.
+- Prefer incremental permission additions with clear milestone justification.
+
+## Milestone discipline
+
+- Keep every milestone **independently testable** before starting the next.
+- Separate testable core logic (validation, parsing, classification) from I/O and `Process` execution.
+- Do not expose raw `/sbin/route` output to the popup unless needed for diagnostics.
+
+## Repository hygiene
+
+- Exclude Swift `.build/`, local manifests, extension ID files, and `.DS_Store` via `.gitignore`.
+- Installation scripts use `$HOME` — never hardcode user home directories.

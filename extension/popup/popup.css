@@ -1,0 +1,167 @@
+/* VPN Route Inspector popup — plain CSS, no framework. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #1a1a1a;
+  background: #f7f8fa;
+  min-width: 320px;
+}
+
+.container {
+  padding: 14px 16px 16px;
+}
+
+.header {
+  margin-bottom: 14px;
+}
+
+.title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: 0;
+  color: #5c6370;
+  font-size: 12px;
+}
+
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.label {
+  font-weight: 500;
+  font-size: 12px;
+  color: #3d4450;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #c8ced8;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #fff;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #4a7fd7;
+  box-shadow: 0 0 0 2px rgba(74, 127, 215, 0.2);
+}
+
+.btn {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: #2f6fed;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: #255ec9;
+}
+
+.btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.status,
+.result {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.hidden {
+  display: none;
+}
+
+.status.loading {
+  display: block;
+  background: #eef3fc;
+  color: #2f5496;
+  border: 1px solid #c9daf5;
+}
+
+.result.success {
+  display: block;
+  background: #edf7ed;
+  border: 1px solid #b8dfba;
+  color: #1f4d21;
+}
+
+.result.error {
+  display: block;
+  background: #fdeeee;
+  border: 1px solid #f0bcbc;
+  color: #7a1f1f;
+}
+
+.result dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+}
+
+.result dt {
+  font-weight: 600;
+}
+
+.result dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.result .error-title {
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.result .error-message {
+  margin: 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.badge.direct {
+  background: #d4edda;
+  color: #155724;
+}
+
+.badge.vpn {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.badge.unknown {
+  background: #e2e3e5;
+  color: #383d41;
+}
