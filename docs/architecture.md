@@ -56,10 +56,12 @@ Executable `vpn-route-host` plus testable core library `VpnRouteHostCore`:
 | `RouteCommandExecutor` | Run `/sbin/route` via `Process` (no shell) |
 | `RouteOutputParser` | Extract `interface:` from command output |
 | `RouteClassifier` | Map interface name to `DIRECT`, `VPN`, or `UNKNOWN` |
+| `NativeMessagingFraming` | Little-endian length-prefix encode/decode |
 | `MessageHandler` | Decode JSON, orchestrate lookup, encode response |
-| `NativeMessagingIO` | Framed read/write on stdin/stdout |
 
-All diagnostics and logs go to **stderr**. **stdout** is reserved exclusively for Native Messaging responses.
+All diagnostics and logs go to **stderr**. **stdout** is reserved exclusively for Native Messaging framed responses.
+
+The canonical release artifact is `native-host/dist/vpn-route-host`, produced only by SwiftPM via `./scripts/build-host.sh`.
 
 ### Route lookup
 
@@ -89,7 +91,7 @@ Classification rules:
 
 ## Future request-capture flow (not implemented)
 
-Later milestones will add optional `webRequest` or `declarativeNetRequest` integration to observe requests from the active tab, resolve actual remote IPs, group by domain, and batch route checks. The native host API may gain actions such as `checkRoutes` (batch) while keeping the same security model.
+Later milestones will add `webRequest` (or an equivalent that exposes actual request metadata and remote IP information) to observe requests from the active tab. `declarativeNetRequest` alone is **not** a substitute when the goal is collecting the actual remote IP Chrome connected to.
 
 ```mermaid
 flowchart LR

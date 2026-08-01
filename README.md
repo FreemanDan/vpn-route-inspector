@@ -22,37 +22,39 @@ Manual IPv4 route check only:
 Chrome popup → service worker → Native Messaging → Swift host → /sbin/route → JSON → popup
 ```
 
-**Not yet implemented:** browser request interception, `webRequest`, or `<all_urls>` permissions.
+**Not yet implemented:** browser request interception, `webRequest`, `<all_urls>`, or DNS inspection.
+
+Milestone 1 does **not** capture browser traffic. After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) before trusting new results.
 
 ## Prerequisites
 
 - macOS 13 or later
-- Xcode Command Line Tools (provides Swift)
+- Xcode or Xcode Command Line Tools (provides Swift Package Manager)
 - Google Chrome
 - An active network connection
 
-No Node.js, npm, Python runtime, or Homebrew dependencies are required for the extension or native host.
+No Node.js, npm, Python, or Homebrew dependencies are required for build, installation, diagnostics, or runtime.
 
 ## Build the native host
+
+Swift Package Manager is the **only** supported build path. There is no fallback build. If `swift test` or `swift build -c release` fails, the build fails visibly.
 
 ```bash
 chmod +x scripts/*.sh
 ./scripts/build-host.sh
 ```
 
-This runs Swift unit tests and builds the release binary at:
+The script runs:
+
+1. `swift test`
+2. `swift build -c release`
+3. Copies the release executable to the canonical artifact:
 
 ```
-native-host/.build/release/vpn-route-host
+native-host/dist/vpn-route-host
 ```
 
-On some Command Line Tools installs, SwiftPM may fail due to a duplicate `SwiftBridging` module map. In that case `build-host.sh` automatically falls back to a direct `swiftc` build with a VFS overlay:
-
-```
-native-host/.manual-build/vpn-route-host
-```
-
-Both paths are supported by `install-host.sh` and `doctor.sh`.
+Install and doctor scripts use **only** that path.
 
 ## Load the unpacked Chrome extension
 
@@ -67,8 +69,6 @@ After loading the unpacked extension:
 
 1. On `chrome://extensions/`, find **VPN Route Inspector**.
 2. Copy the **ID** shown under the extension name (32 lowercase letters `a`–`p`).
-
-Example format: `abcdefghijklmnopqrstuvwxyzabcdef`
 
 Do not commit this ID to the repository — it is machine-specific for unpacked extensions.
 
@@ -87,6 +87,15 @@ Restart Chrome completely (Command+Q, then reopen) after installation.
 
 ## Test the extension
 
+Chrome Native Messaging is **not verified** until:
+
+1. The unpacked extension ID is known,
+2. `./scripts/install-host.sh <extension-id>` has been run,
+3. Chrome has been fully restarted (Command+Q),
+4. The popup **Check route** test succeeds.
+
+Then:
+
 1. Click the VPN Route Inspector toolbar icon.
 2. Leave the default IP `1.1.1.1` or enter another IPv4 address.
 3. Click **Check route**.
@@ -101,14 +110,6 @@ Restart Chrome completely (Command+Q, then reopen) after installation.
 
 Run `./scripts/doctor.sh` if native messaging fails.
 
-### Testing with VPN enabled/disabled
-
-1. **VPN disabled:** check `1.1.1.1` — expect `en*` and `DIRECT`.
-2. **VPN enabled:** check the same IP — if not excluded, expect `utun*` and `VPN`.
-3. Add an exclusion for that IP in your VPN client, reconnect the VPN, **fully quit Chrome** (Command+Q), reopen, and check again — expect `DIRECT`.
-
-Route table changes may require reconnecting the VPN and fully restarting Chrome before results reflect the new routing.
-
 ## Uninstall
 
 ```bash
@@ -121,7 +122,7 @@ Remove the extension from `chrome://extensions/` manually if desired.
 
 ```
 extension/          Chrome MV3 extension (plain JS/HTML/CSS)
-native-host/        Swift native messaging host
+native-host/        Swift native messaging host (SwiftPM)
 scripts/            build, install, uninstall, doctor
 docs/               architecture and milestone documentation
 ```

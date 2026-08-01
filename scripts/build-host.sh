@@ -1,42 +1,72 @@
 #!/bin/zsh
-# Build the VPN Route Inspector native host (release) and run Swift tests.
+# Build the VPN Route Inspector native host via Swift Package Manager only.
 set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 HOST_DIR="${REPO_ROOT}/native-host"
-VFS_OVERLAY="${HOST_DIR}/swift-vfs-overlay.yaml"
+DIST_DIR="${HOST_DIR}/dist"
+CANONICAL_BINARY="${DIST_DIR}/vpn-route-host"
 
-SPM_BINARY="${HOST_DIR}/.build/release/vpn-route-host"
-MANUAL_BINARY="${HOST_DIR}/.manual-build/vpn-route-host"
+echo "==> Removing previous dist output..."
+rm -rf "${DIST_DIR}"
+mkdir -p "${DIST_DIR}"
 
-run_spm_build() {
-  echo "==> Running Swift tests (SwiftPM)..."
-  (cd "${HOST_DIR}" && swift test \
-    -Xswiftc -vfsoverlay -Xswiftc "${VFS_OVERLAY}")
+echo "==> Running Swift tests..."
+( cd "${HOST_DIR}" && swift test )
 
-  echo ""
-  echo "==> Building release executable (SwiftPM)..."
-  (cd "${HOST_DIR}" && swift build -c release \
-    -Xswiftc -vfsoverlay -Xswiftc "${VFS_OVERLAY}")
-}
+echo ""
+echo "==> Building release executable..."
+( cd "${HOST_DIR}" && swift build -c release )
 
-if run_spm_build 2>/dev/null; then
-  BINARY_PATH="${SPM_BINARY}"
-else
-  echo "SwiftPM build unavailable (often due to CLT SwiftBridging module map conflict)."
-  echo "==> Falling back to manual swiftc build with VFS overlay..."
-  echo ""
-  chmod +x "${HOST_DIR}/build-manual.sh"
-  "${HOST_DIR}/build-manual.sh"
-  BINARY_PATH="${MANUAL_BINARY}"
+echo ""
+echo "==> Locating SwiftPM release binary..."
+BUILD_BIN_DIR="$( cd "${HOST_DIR}" && swift build -c release --show-bin-path )"
+SPM_BINARY="${BUILD_BIN_DIR}/vpn-route-host"
+
+if [[ ! -f "${SPM_BINARY}" ]]; then
+  echo "ERROR: SwiftPM release binary not found at ${SPM_BINARY}" >&2
+  exit 1
 fi
 
-if [[ ! -f "${BINARY_PATH}" ]]; then
-  echo "ERROR: Expected binary not found at ${BINARY_PATH}" >&2
+echo "==> Copying to canonical artifact path..."
+cp "${SPM_BINARY}" "${CANONICAL_BINARY}"
+chmod +x "${CANONICAL_BINARY}"
+
+echo "==> Verifying Mach-O executable..."
+FILE_OUTPUT="$(file "${CANONICAL_BINARY}")"
+if [[ "${FILE_OUTPUT}" != *"Mach-O"* ]]; then
+  echo "ERROR: Canonical binary is not a Mach-O executable:" >&2
+  echo "  ${FILE_OUTPUT}" >&2
+  exit 1
+fi
+
+echo "==> Checking dynamic library dependencies..."
+FORBIDDEN=0
+while IFS= read -r line; do
+  [[ -z "${line}" ]] && continue
+  dep="${line//[$'\t ']/}"
+  dep="${dep%% (*}"
+
+  case "${dep}" in
+    @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*)
+      continue
+      ;;
+  esac
+
+  if [[ "${dep}" == "${REPO_ROOT}"* ]] \
+    || [[ "${dep}" == *"/.build/"* ]] \
+    || [[ "${dep}" == *"/dist/"* ]] \
+    || [[ "${dep}" == *"/native-host/"* ]]; then
+    echo "ERROR: Forbidden repository-local dependency: ${dep}" >&2
+    FORBIDDEN=1
+  fi
+done < <(otool -L "${CANONICAL_BINARY}" | tail -n +2)
+
+if [[ "${FORBIDDEN}" -ne 0 ]]; then
   exit 1
 fi
 
 echo ""
 echo "Build complete."
-echo "Release binary: ${BINARY_PATH}"
+echo "Canonical release binary: ${CANONICAL_BINARY}"

@@ -22,17 +22,11 @@ fi
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
-HOST_DIR="${REPO_ROOT}/native-host"
-SOURCE_BINARY="${HOST_DIR}/.build/release/vpn-route-host"
-MANUAL_BINARY="${HOST_DIR}/.manual-build/vpn-route-host"
+SOURCE_BINARY="${REPO_ROOT}/native-host/dist/vpn-route-host"
 
-if [[ -f "${SOURCE_BINARY}" ]]; then
-  :
-elif [[ -f "${MANUAL_BINARY}" ]]; then
-  SOURCE_BINARY="${MANUAL_BINARY}"
-else
-  echo "ERROR: Release binary not found. Run scripts/build-host.sh first." >&2
-  echo "  Expected: ${SOURCE_BINARY}" >&2
+if [[ ! -f "${SOURCE_BINARY}" ]]; then
+  echo "ERROR: Canonical binary not found at ${SOURCE_BINARY}" >&2
+  echo "Run ./scripts/build-host.sh first." >&2
   exit 1
 fi
 
@@ -40,39 +34,52 @@ INSTALL_DIR="${HOME}/Library/Application Support/VpnRouteInspector"
 INSTALL_BINARY="${INSTALL_DIR}/vpn-route-host"
 MANIFEST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 MANIFEST_PATH="${MANIFEST_DIR}/com.freemandan.vpn_route_inspector.json"
+ALLOWED_ORIGIN="chrome-extension://${EXTENSION_ID}/"
 
-echo "==> Creating install directory..."
+TMP_PLIST=""
+TMP_JSON=""
+TMP_BINARY=""
+TMP_MANIFEST=""
+cleanup() {
+  [[ -n "${TMP_PLIST}" && -f "${TMP_PLIST}" ]] && rm -f "${TMP_PLIST}"
+  [[ -n "${TMP_JSON}" && -f "${TMP_JSON}" ]] && rm -f "${TMP_JSON}"
+  [[ -n "${TMP_BINARY}" && -f "${TMP_BINARY}" ]] && rm -f "${TMP_BINARY}"
+  [[ -n "${TMP_MANIFEST}" && -f "${TMP_MANIFEST}" ]] && rm -f "${TMP_MANIFEST}"
+}
+trap cleanup EXIT
+
+echo "==> Creating install directories..."
 mkdir -p "${INSTALL_DIR}"
 mkdir -p "${MANIFEST_DIR}"
 
 echo "==> Installing binary to ${INSTALL_BINARY}..."
-cp -f "${SOURCE_BINARY}" "${INSTALL_BINARY}"
-chmod +x "${INSTALL_BINARY}"
+TMP_BINARY="$(mktemp "${INSTALL_DIR}/.vpn-route-host.XXXXXX")"
+cp "${SOURCE_BINARY}" "${TMP_BINARY}"
+chmod +x "${TMP_BINARY}"
+mv -f "${TMP_BINARY}" "${INSTALL_BINARY}"
+TMP_BINARY=""
 
-echo "==> Writing Native Messaging manifest to ${MANIFEST_PATH}..."
+echo "==> Generating Native Messaging manifest..."
+TMP_PLIST="$(mktemp "${TMPDIR:-/tmp}/vpn-route-inspector-manifest.XXXXXX.plist")"
+TMP_JSON="$(mktemp "${TMPDIR:-/tmp}/vpn-route-inspector-manifest.XXXXXX.json")"
 
-# Use python3 for JSON generation to avoid shell-escaping issues with paths.
-python3 - <<PY
-import json
-import os
+/usr/libexec/PlistBuddy -c "Add :name string com.freemandan.vpn_route_inspector" "${TMP_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :description string VPN Route Inspector native host for macOS route lookups" "${TMP_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :path string ${INSTALL_BINARY}" "${TMP_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :type string stdio" "${TMP_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :allowed_origins array" "${TMP_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :allowed_origins:0 string ${ALLOWED_ORIGIN}" "${TMP_PLIST}"
 
-manifest = {
-    "name": "com.freemandan.vpn_route_inspector",
-    "description": "VPN Route Inspector native host for macOS route lookups",
-    "path": os.path.abspath("${INSTALL_BINARY}"),
-    "type": "stdio",
-    "allowed_origins": [
-        "chrome-extension://${EXTENSION_ID}/"
-    ],
-}
+plutil -convert json -o "${TMP_JSON}" "${TMP_PLIST}"
+plutil -lint "${TMP_JSON}" >/dev/null
 
-with open("${MANIFEST_PATH}", "w", encoding="utf-8") as f:
-    json.dump(manifest, f, indent=2)
-    f.write("\n")
-PY
+TMP_MANIFEST="$(mktemp "${MANIFEST_DIR}/.com.freemandan.vpn_route_inspector.json.XXXXXX")"
+cp "${TMP_JSON}" "${TMP_MANIFEST}"
+mv -f "${TMP_MANIFEST}" "${MANIFEST_PATH}"
+TMP_MANIFEST=""
 
 echo ""
 echo "Installation complete."
 echo "  Binary:    ${INSTALL_BINARY}"
 echo "  Manifest:  ${MANIFEST_PATH}"
-echo "  Extension: chrome-extension://${EXTENSION_ID}/"
+echo "  Extension: ${ALLOWED_ORIGIN}"

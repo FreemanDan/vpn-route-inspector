@@ -18,7 +18,7 @@ final class IPv4ValidatorTests: XCTestCase {
         XCTAssertFalse(IPv4Validator.isValid("1.1.1.1a"))
         XCTAssertFalse(IPv4Validator.isValid("example.com"))
         XCTAssertFalse(IPv4Validator.isValid("::1"))
-        XCTAssertFalse(IPv4Validator.isValid("01.1.1.1")) // leading zero
+        XCTAssertFalse(IPv4Validator.isValid("01.1.1.1"))
         XCTAssertFalse(IPv4Validator.isValid("-1.0.0.1"))
     }
 }
@@ -69,24 +69,116 @@ final class RouteClassifierTests: XCTestCase {
     }
 }
 
+final class NativeMessagingFramingTests: XCTestCase {
+    func testDecodeLengthLittleEndian() throws {
+        let bytes = Data([0x05, 0x00, 0x00, 0x00])
+        XCTAssertEqual(try NativeMessagingFraming.decodeLengthPrefix(bytes), 5)
+    }
+
+    func testEncodeLengthLittleEndian() throws {
+        let prefix = try NativeMessagingFraming.encodeLengthPrefix(0x01020304)
+        XCTAssertEqual(prefix, Data([0x04, 0x03, 0x02, 0x01]))
+    }
+
+    func testCleanEOFBeforePrefix() {
+        XCTAssertThrowsError(try NativeMessagingFraming.decodeFramedMessage(from: Data())) { error in
+            XCTAssertEqual(error as? NativeMessagingFraming.FramingError, .cleanEOF)
+        }
+    }
+
+    func testPartialLengthPrefix() {
+        let partial = Data([0x01, 0x00])
+        XCTAssertThrowsError(try NativeMessagingFraming.decodeLengthPrefix(partial)) { error in
+            XCTAssertEqual(error as? NativeMessagingFraming.FramingError, .partialLengthPrefix(bytesRead: 2))
+        }
+    }
+
+    func testZeroLengthRejected() {
+        let zero = Data([0x00, 0x00, 0x00, 0x00])
+        XCTAssertThrowsError(try NativeMessagingFraming.decodeLengthPrefix(zero)) { error in
+            XCTAssertEqual(error as? NativeMessagingFraming.FramingError, .zeroLength)
+        }
+    }
+
+    func testOversizedLengthRejected() {
+        let tooLarge = Data([0x00, 0x00, 0x10, 0x00])
+        XCTAssertThrowsError(try NativeMessagingFraming.decodeLengthPrefix(tooLarge)) { error in
+            if case .messageTooLarge = error as? NativeMessagingFraming.FramingError {
+                return
+            }
+            XCTFail("Expected messageTooLarge")
+        }
+    }
+
+    func testTruncatedPayload() throws {
+        let payload = Data("abc".utf8)
+        var framed = try NativeMessagingFraming.encodeFramedMessage(payload)
+        framed.removeLast()
+
+        XCTAssertThrowsError(try NativeMessagingFraming.decodeFramedMessage(from: framed)) { error in
+            if case .truncatedPayload = error as? NativeMessagingFraming.FramingError {
+                return
+            }
+            XCTFail("Expected truncatedPayload")
+        }
+    }
+
+    func testOneValidFramedMessage() throws {
+        let payload = Data("{\"ok\":true}".utf8)
+        let framed = try NativeMessagingFraming.encodeFramedMessage(payload)
+        let decoded = try NativeMessagingFraming.decodeFramedMessage(from: framed)
+        XCTAssertEqual(decoded.message, payload)
+        XCTAssertTrue(decoded.remaining.isEmpty)
+    }
+
+    func testTwoConsecutiveFramedMessages() throws {
+        let first = Data("{\"a\":1}".utf8)
+        let second = Data("{\"b\":2}".utf8)
+        let buffer = try NativeMessagingFraming.encodeFramedMessage(first)
+            + NativeMessagingFraming.encodeFramedMessage(second)
+
+        let decodedFirst = try NativeMessagingFraming.decodeFramedMessage(from: buffer)
+        XCTAssertEqual(decodedFirst.message, first)
+
+        let decodedSecond = try NativeMessagingFraming.decodeFramedMessage(from: decodedFirst.remaining)
+        XCTAssertEqual(decodedSecond.message, second)
+        XCTAssertTrue(decodedSecond.remaining.isEmpty)
+    }
+
+    func testFramedResponseEncoding() throws {
+        let response = Data("{\"ok\":true,\"requestId\":\"r1\"}".utf8)
+        let framed = try NativeMessagingFraming.encodeFramedMessage(response)
+        XCTAssertEqual(framed.prefix(4), try NativeMessagingFraming.encodeLengthPrefix(UInt32(response.count)))
+        XCTAssertEqual(framed.suffix(from: 4), response)
+    }
+
+    func testEmptyPayloadRejectedOnEncode() {
+        XCTAssertThrowsError(try NativeMessagingFraming.encodeFramedMessage(Data())) { error in
+            XCTAssertEqual(error as? NativeMessagingFraming.FramingError, .emptyPayload)
+        }
+    }
+}
+
 /// Fake route executor for unit tests — never touches `/sbin/route`.
 private struct FakeRouteExecutor: RouteCommandExecuting {
     let output: String
-    let shouldThrow: Bool
+    let thrownError: Error?
 
-    init(output: String, shouldThrow: Bool = false) {
+    init(output: String, thrownError: Error? = nil) {
         self.output = output
-        self.shouldThrow = shouldThrow
+        self.thrownError = thrownError
     }
 
     func runRouteGet(ip: String) throws -> String {
-        if shouldThrow { throw NSError(domain: "test", code: 1) }
+        if let thrownError {
+            throw thrownError
+        }
         return output
     }
 }
 
 final class MessageHandlerTests: XCTestCase {
-    func testCheckRouteSuccessDirect() throws {
+    func testCheckRouteSuccessDirect() {
         let output = "route to 1.1.1.1\n    interface: en0\n"
         let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: output))
 
@@ -103,7 +195,7 @@ final class MessageHandlerTests: XCTestCase {
         XCTAssertNil(response.error)
     }
 
-    func testCheckRouteSuccessVPN() throws {
+    func testCheckRouteSuccessVPN() {
         let output = "route to 1.1.1.1\n    interface: utun4\n"
         let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: output))
 
@@ -158,5 +250,20 @@ final class MessageHandlerTests: XCTestCase {
 
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.error?.code, HostErrorCode.interfaceNotFound)
+    }
+
+    func testRouteCommandFailure() {
+        let handler = MessageHandler(routeExecutor: FakeRouteExecutor(
+            output: "",
+            thrownError: RouteCommandError.nonZeroExit(status: 1, reason: .exit)
+        ))
+
+        let requestJSON = """
+        {"action":"checkRoute","requestId":"req-6","ip":"1.1.1.1"}
+        """
+        let response = handler.handle(data: Data(requestJSON.utf8))
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, HostErrorCode.routeCommandFailed)
     }
 }

@@ -8,6 +8,23 @@ const checkBtn = document.getElementById('check-btn');
 const statusEl = document.getElementById('status');
 const resultEl = document.getElementById('result');
 
+/** Allowed route types from the native host — CSS classes are never derived from raw strings. */
+const ROUTE_TYPE_BADGE_CLASS = {
+  DIRECT: 'direct',
+  VPN: 'vpn',
+  UNKNOWN: 'unknown',
+};
+
+/**
+ * Maps a native-host route type to a safe CSS badge class name.
+ * @param {string} routeType
+ * @returns {string}
+ */
+function routeTypeBadgeClass(routeType) {
+  const normalized = String(routeType || '').toUpperCase();
+  return ROUTE_TYPE_BADGE_CLASS[normalized] || ROUTE_TYPE_BADGE_CLASS.UNKNOWN;
+}
+
 /**
  * Shows the loading state and hides previous results.
  * @param {string} message
@@ -36,8 +53,9 @@ function hideLoading() {
  * @param {object} response - Native host JSON response.
  */
 function showSuccess(response) {
-  const routeType = response.routeType || 'UNKNOWN';
-  const badgeClass = routeType.toLowerCase();
+  const routeType = String(response.routeType || 'UNKNOWN').toUpperCase();
+  const badgeClass = routeTypeBadgeClass(routeType);
+  const displayType = ROUTE_TYPE_BADGE_CLASS[routeType] ? routeType : 'UNKNOWN';
 
   resultEl.className = 'result success';
   resultEl.innerHTML = `
@@ -47,7 +65,7 @@ function showSuccess(response) {
       <dt>Interface</dt>
       <dd>${escapeHtml(response.interface || '—')}</dd>
       <dt>Route type</dt>
-      <dd><span class="badge ${badgeClass}">${escapeHtml(routeType)}</span></dd>
+      <dd><span class="badge ${badgeClass}">${escapeHtml(displayType)}</span></dd>
     </dl>
   `;
 }
@@ -86,6 +104,12 @@ function escapeHtml(value) {
  */
 async function handleCheckRoute() {
   const ip = ipInput.value.trim();
+
+  if (!ip) {
+    showError('Validation error', 'Enter an IPv4 address before checking the route.');
+    return;
+  }
+
   showLoading('Checking route…');
 
   try {
@@ -93,8 +117,6 @@ async function handleCheckRoute() {
       type: 'CHECK_ROUTE',
       ip,
     });
-
-    hideLoading();
 
     if (!bridgeResponse) {
       showError('Communication error', 'No response from the service worker.');
@@ -116,11 +138,12 @@ async function handleCheckRoute() {
       showError('Route check failed', err.message || 'Unknown error.', err.code);
     }
   } catch (err) {
-    hideLoading();
     showError(
       'Extension error',
       err instanceof Error ? err.message : String(err)
     );
+  } finally {
+    hideLoading();
   }
 }
 

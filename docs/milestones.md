@@ -7,8 +7,9 @@ Small, independently verifiable milestones for VPN Route Inspector.
 **Goal:** User enters an IPv4 in the popup; extension returns interface and route type.
 
 **Verify:**
-- `./scripts/build-host.sh` passes Swift tests
+- `./scripts/build-host.sh` passes (`swift test`, `swift build -c release`, artifact at `native-host/dist/vpn-route-host`)
 - `./scripts/install-host.sh <extension-id>` installs manifest
+- Chrome fully restarted; popup **Check route** succeeds
 - Popup shows `en0` / `DIRECT` with VPN off
 - Popup shows `utun*` / `VPN` for non-excluded IPs with VPN on
 

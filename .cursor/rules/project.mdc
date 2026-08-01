@@ -10,9 +10,17 @@ alwaysApply: true
 
 - **Native host:** Swift only, Swift Package Manager, Apple system libraries.
 - **Extension:** plain JavaScript, HTML, CSS — Manifest V3.
-- **No Python** as an application runtime dependency.
+- **No Python** for build, installation, diagnostics, or runtime.
 - **No Node.js** runtime, npm, bundlers, or frontend frameworks.
 - **No Homebrew** dependencies for core functionality.
+
+## Build system
+
+- **Swift Package Manager is the only supported build path.**
+- There is **no fallback build**, manual `swiftc` pipeline, VFS overlay, or parallel test runner.
+- If `swift test` or `swift build -c release` fails, the build **must fail visibly**.
+- Do not introduce fallback build systems or silently bypass failed tests. Fix the supported build path or report the blocker.
+- The canonical distributable artifact is `native-host/dist/vpn-route-host`.
 
 ## Native host security
 
@@ -27,22 +35,23 @@ alwaysApply: true
 
 - Do not store secrets, credentials, cookies, or browsing history.
 - Do not commit generated extension IDs or `.extension-id` files.
-- Do not commit machine-specific absolute paths (e.g. `/Users/admin/...`).
+- Do not commit machine-specific absolute paths.
 - Do not commit installed Native Messaging manifests under `~/Library/`.
 
 ## Chrome extension permissions
 
 - Minimize permissions for each milestone.
 - Do **not** add `<all_urls>` or `webRequest` until active-tab request capture actually requires them.
-- Prefer incremental permission additions with clear milestone justification.
+- `declarativeNetRequest` is not a substitute for `webRequest` when the goal is observing actual request metadata and remote IP information.
 
 ## Milestone discipline
 
 - Keep every milestone **independently testable** before starting the next.
-- Separate testable core logic (validation, parsing, classification) from I/O and `Process` execution.
+- Separate testable core logic (validation, parsing, classification, framing) from I/O and `Process` execution.
 - Do not expose raw `/sbin/route` output to the popup unless needed for diagnostics.
+- Milestone 1 does not capture browser traffic.
 
 ## Repository hygiene
 
-- Exclude Swift `.build/`, local manifests, extension ID files, and `.DS_Store` via `.gitignore`.
+- Exclude `native-host/dist/`, `native-host/.build/`, local manifests, extension ID files, and `.DS_Store` via `.gitignore`.
 - Installation scripts use `$HOME` — never hardcode user home directories.

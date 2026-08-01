@@ -1,7 +1,7 @@
 /**
  * Manifest V3 service worker.
  * Receives route-check requests from the popup and forwards them to the native host
- * via Chrome Native Messaging. No webRequest or broad host permissions in Milestone 1.
+ * via Chrome Native Messaging. Milestone 1 uses only the nativeMessaging permission.
  */
 
 /** Native Messaging host name registered in the Chrome manifest on disk. */
@@ -36,38 +36,59 @@ function checkRouteViaNativeHost(ip) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer = null;
 
-    const timer = setTimeout(() => {
-      if (settled) return;
+    const finish = (handler) => {
+      if (settled) {
+        return;
+      }
       settled = true;
-      reject(new Error('Native host did not respond in time. Is it installed? Run scripts/doctor.sh.'));
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      handler();
+    };
+
+    timer = setTimeout(() => {
+      finish(() => {
+        reject(new Error('Native host did not respond in time. Is it installed? Run scripts/doctor.sh.'));
+      });
     }, NATIVE_MESSAGE_TIMEOUT_MS);
 
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, payload, (response) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-
+        // Always read lastError inside the callback to avoid unchecked runtime errors.
         const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'Native messaging failed.'));
+
+        if (settled) {
           return;
         }
 
-        if (!response || typeof response !== 'object') {
-          reject(new Error('Native host returned an empty or invalid response.'));
-          return;
-        }
+        finish(() => {
+          if (runtimeError) {
+            reject(new Error(runtimeError.message || 'Native messaging failed.'));
+            return;
+          }
 
-        resolve(response);
+          if (!response || typeof response !== 'object') {
+            reject(new Error('Native host returned an empty or invalid response.'));
+            return;
+          }
+
+          const responseId = response.requestId;
+          if (typeof responseId !== 'string' || responseId !== requestId) {
+            reject(new Error('Native host response requestId does not match the outbound request.'));
+            return;
+          }
+
+          resolve(response);
+        });
       });
     } catch (err) {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
+      finish(() => {
         reject(err instanceof Error ? err : new Error(String(err)));
-      }
+      });
     }
   });
 }
@@ -92,6 +113,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     });
 
-  // Keep the message channel open for the async native messaging call.
   return true;
 });

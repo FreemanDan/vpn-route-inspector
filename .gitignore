@@ -12,9 +12,10 @@ Package.resolved
 *.xcworkspace/
 DerivedData/
 
-# Native host build output (local release binary)
+# Native host build output
+native-host/dist/
 native-host/.build/
-native-host/.manual-build/
+native-host/.swiftpm/
 
 # Local generated Native Messaging manifests (installed per-machine)
 **/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json

@@ -125,25 +125,14 @@ chrome.runtime.sendNativeMessage(
 
 Chrome handles process lifecycle: it starts `vpn-route-host`, writes the framed request to stdin, reads the framed response from stdout, and terminates the host.
 
-## Manual testing (advanced)
+The service worker verifies that the native host echoes the same `requestId` that was sent.
 
-After installation, you can send a framed message from the shell for debugging:
+## Build artifact
 
-```python
-import json, struct, subprocess
+The installed binary comes from the canonical SwiftPM output copied by `./scripts/build-host.sh`:
 
-msg = json.dumps({"action": "checkRoute", "requestId": "test-1", "ip": "1.1.1.1"}).encode()
-proc = subprocess.Popen(
-    ["/path/to/vpn-route-host"],
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-)
-proc.stdin.write(struct.pack("<I", len(msg)) + msg)
-proc.stdin.flush()
-length = struct.unpack("<I", proc.stdout.read(4))[0]
-print(proc.stdout.read(length).decode())
-print(proc.stderr.read().decode(), file=__import__("sys").stderr)
+```
+native-host/dist/vpn-route-host
 ```
 
-Replace `/path/to/vpn-route-host` with your installed binary path.
+There is no alternate manual build path.

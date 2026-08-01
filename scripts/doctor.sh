@@ -4,9 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
-HOST_DIR="${REPO_ROOT}/native-host"
-BUILT_BINARY="${HOST_DIR}/.build/release/vpn-route-host"
-MANUAL_BINARY="${HOST_DIR}/.manual-build/vpn-route-host"
+DIST_BINARY="${REPO_ROOT}/native-host/dist/vpn-route-host"
 INSTALLED_BINARY="${HOME}/Library/Application Support/VpnRouteInspector/vpn-route-host"
 MANIFEST_PATH="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json"
 
@@ -43,10 +41,22 @@ fi
 
 echo ""
 echo "Toolchain"
-if command -v swift >/dev/null 2>&1; then
-  check_pass "Swift available: $(swift --version | head -1)"
+if xcrun --find swift >/dev/null 2>&1; then
+  check_pass "swift: $(xcrun --find swift)"
 else
-  check_fail "Swift not found — install Xcode Command Line Tools"
+  check_fail "xcrun --find swift failed"
+fi
+
+if xcrun --find swiftc >/dev/null 2>&1; then
+  check_pass "swiftc: $(xcrun --find swiftc)"
+else
+  check_fail "xcrun --find swiftc failed"
+fi
+
+if command -v swift >/dev/null 2>&1; then
+  check_pass "Swift version: $(swift --version | head -1)"
+else
+  check_fail "swift not available"
 fi
 
 if [[ -x /sbin/route ]]; then
@@ -65,59 +75,103 @@ else
 fi
 
 echo ""
-echo "Native host build"
-if [[ -f "${BUILT_BINARY}" && -x "${BUILT_BINARY}" ]]; then
-  check_pass "Release binary built (SwiftPM): ${BUILT_BINARY}"
-elif [[ -f "${MANUAL_BINARY}" && -x "${MANUAL_BINARY}" ]]; then
-  check_pass "Release binary built (manual): ${MANUAL_BINARY}"
+echo "Canonical build artifact"
+if [[ -f "${DIST_BINARY}" && -x "${DIST_BINARY}" ]]; then
+  check_pass "dist binary exists: ${DIST_BINARY}"
+  file_output="$(file "${DIST_BINARY}")"
+  if [[ "${file_output}" == *"Mach-O"* ]]; then
+    check_pass "dist binary is Mach-O"
+  else
+    check_fail "dist binary is not Mach-O: ${file_output}"
+  fi
+
+  forbidden_dep=0
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    dep="${line//[$'\t ']/}"
+    dep="${dep%% (*}"
+    case "${dep}" in
+      @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*) continue ;;
+    esac
+    if [[ "${dep}" == "${REPO_ROOT}"* ]] || [[ "${dep}" == *"/.build/"* ]] || [[ "${dep}" == *"/dist/"* ]]; then
+      check_fail "dist binary depends on repository path: ${dep}"
+      forbidden_dep=1
+    fi
+  done < <(otool -L "${DIST_BINARY}" | tail -n +2)
+  if [[ "${forbidden_dep}" -eq 0 ]]; then
+    check_pass "dist binary has no repository-local runtime dependencies"
+  fi
 else
-  check_warn "Release binary not built — run scripts/build-host.sh"
+  check_warn "dist binary missing — run ./scripts/build-host.sh"
 fi
 
 echo ""
 echo "Native host installation"
 if [[ -f "${MANIFEST_PATH}" ]]; then
-  check_pass "Native Messaging manifest exists: ${MANIFEST_PATH}"
+  if plutil -lint "${MANIFEST_PATH}" >/dev/null 2>&1; then
+    check_pass "Native Messaging manifest is valid JSON/plist: ${MANIFEST_PATH}"
+  else
+    check_fail "Native Messaging manifest is malformed: ${MANIFEST_PATH}"
+  fi
 
-  if command -v python3 >/dev/null 2>&1; then
-    manifest_path="$(python3 - <<PY
-import json
-with open("${MANIFEST_PATH}", encoding="utf-8") as f:
-    data = json.load(f)
-print(data.get("path", ""))
-PY
-)"
-    if [[ -n "${manifest_path}" && -f "${manifest_path}" && -x "${manifest_path}" ]]; then
-      check_pass "Manifest path points to existing executable: ${manifest_path}"
+  manifest_name="$(plutil -extract name raw -o - "${MANIFEST_PATH}" 2>/dev/null || echo "")"
+  if [[ "${manifest_name}" == "com.freemandan.vpn_route_inspector" ]]; then
+    check_pass "manifest name is correct"
+  else
+    check_fail "manifest name is incorrect: ${manifest_name:-<missing>}"
+  fi
+
+  manifest_path="$(plutil -extract path raw -o - "${MANIFEST_PATH}" 2>/dev/null || echo "")"
+  expected_path="${INSTALLED_BINARY}"
+  if [[ "${manifest_path}" == "${expected_path}" ]]; then
+    check_pass "manifest path matches expected installed executable"
+  else
+    check_fail "manifest path mismatch: ${manifest_path:-<missing>}"
+  fi
+
+  if [[ -n "${manifest_path}" && -f "${manifest_path}" && -x "${manifest_path}" ]]; then
+    check_pass "installed executable exists and is executable"
+  else
+    check_fail "installed executable missing or not executable: ${manifest_path:-<missing>}"
+  fi
+
+  origin="$(plutil -extract allowed_origins.0 raw -o - "${MANIFEST_PATH}" 2>/dev/null || echo "")"
+  if [[ "${origin}" =~ '^chrome-extension://[a-p]{32}/$' ]]; then
+    check_pass "allowed_origins contains a valid extension origin"
+    echo "       ${origin}"
+  else
+    check_fail "allowed_origins is missing or invalid: ${origin:-<missing>}"
+  fi
+
+  if [[ -f "${INSTALLED_BINARY}" && -x "${INSTALLED_BINARY}" ]]; then
+    # Closing stdin immediately should let the host exit without hanging.
+    if "${INSTALLED_BINARY}" </dev/null >/dev/null 2>&1; then
+      check_pass "installed binary starts and exits cleanly with closed stdin"
     else
-      check_fail "Manifest path does not point to an existing executable: ${manifest_path:-<missing>}"
+      check_fail "installed binary did not exit cleanly with closed stdin"
     fi
 
-    origins="$(python3 - <<PY
-import json
-with open("${MANIFEST_PATH}", encoding="utf-8") as f:
-    data = json.load(f)
-for o in data.get("allowed_origins", []):
-    print(o)
-PY
-)"
-    if [[ -n "${origins}" ]]; then
-      check_pass "allowed_origins configured"
-      echo "       ${origins}"
-    else
-      check_warn "allowed_origins is empty"
+    forbidden_installed=0
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      dep="${line//[$'\t ']/}"
+      dep="${dep%% (*}"
+      case "${dep}" in
+        @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*) continue ;;
+      esac
+      if [[ "${dep}" == "${REPO_ROOT}"* ]] || [[ "${dep}" == *"/.build/"* ]] || [[ "${dep}" == *"/dist/"* ]]; then
+        check_fail "installed binary depends on repository path: ${dep}"
+        forbidden_installed=1
+      fi
+    done < <(otool -L "${INSTALLED_BINARY}" | tail -n +2)
+    if [[ "${forbidden_installed}" -eq 0 ]]; then
+      check_pass "installed binary has no repository-local runtime dependencies"
     fi
   else
-    check_warn "python3 not available — skipping manifest content validation"
+    check_warn "installed binary not present for runtime checks"
   fi
 else
   check_warn "Native Messaging manifest not installed — run scripts/install-host.sh <extension-id>"
-fi
-
-if [[ -f "${INSTALLED_BINARY}" && -x "${INSTALLED_BINARY}" ]]; then
-  check_pass "Installed binary exists: ${INSTALLED_BINARY}"
-else
-  check_warn "Installed binary not found at ${INSTALLED_BINARY}"
 fi
 
 echo ""

@@ -2,7 +2,7 @@ import Foundation
 
 /// Abstraction over `/sbin/route` execution so tests can inject fake output.
 public protocol RouteCommandExecuting {
-    /// Runs `route -n get <ip>` and returns combined stdout+stderr text, or throws on launch failure.
+    /// Runs `route -n get <ip>` and returns combined stdout+stderr text, or throws on failure.
     func runRouteGet(ip: String) throws -> String
 }
 
@@ -21,16 +21,33 @@ public struct SystemRouteCommandExecutor: RouteCommandExecuting {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            fputs("Failed to launch /sbin/route: \(error)\n", stderr)
+            throw RouteCommandError.launchFailed
+        }
+
         process.waitUntilExit()
 
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        let stderrText = String(data: stderrData, encoding: .utf8) ?? ""
+
+        let reason = process.terminationReason
+        let status = process.terminationStatus
+
+        guard reason == .exit, status == 0 else {
+            if !stderrText.isEmpty {
+                fputs("/sbin/route stderr: \(stderrText)\n", stderr)
+            }
+            fputs("/sbin/route exited with reason=\(reason) status=\(status)\n", stderr)
+            throw RouteCommandError.nonZeroExit(status: status, reason: reason)
+        }
 
         // Route may write useful fields to either stream depending on macOS version.
-        return stdout + stderr
+        return stdout + stderrText
     }
 }
