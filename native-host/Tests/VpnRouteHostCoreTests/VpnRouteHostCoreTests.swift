@@ -285,6 +285,25 @@ struct NativeMessagingFramingTests {
 
 // MARK: - Test doubles
 
+/// Immutable per-call outcome for a fake route executor.
+private struct FakeRouteOutcome: Sendable {
+    let output: String
+    let thrownError: RouteCommandError?
+
+    init(output: String, thrownError: RouteCommandError? = nil) {
+        self.output = output
+        self.thrownError = thrownError
+    }
+
+    static func output(_ text: String) -> FakeRouteOutcome {
+        FakeRouteOutcome(output: text)
+    }
+
+    static func throwError(_ error: RouteCommandError) -> FakeRouteOutcome {
+        FakeRouteOutcome(output: "", thrownError: error)
+    }
+}
+
 /// Immutable fake route executor for unit tests — never touches `/sbin/route`.
 /// All stored properties are `let`; each test constructs its own instance so
 /// concurrent Swift Testing runs do not share mutable state across tests.
@@ -305,6 +324,40 @@ private struct FakeRouteExecutor: RouteCommandExecuting {
             throw thrownError
         }
         return output
+    }
+}
+
+/// Immutable map-based fake executor: different IPs can return different outputs/errors.
+/// Tracks which IPs were queried (via a box) only when the test needs call-order assertions;
+/// the box is created per-test and never shared across concurrent suites.
+private final class FakeRouteCallLog: @unchecked Sendable {
+    private(set) var ips: [String] = []
+    func append(_ ip: String) { ips.append(ip) }
+}
+
+private struct FakeRouteMapExecutor: RouteCommandExecuting {
+    /// Per-IP outcomes. Missing keys use `defaultOutcome`.
+    let outcomesByIP: [String: FakeRouteOutcome]
+    let defaultOutcome: FakeRouteOutcome
+    let callLog: FakeRouteCallLog?
+
+    init(
+        outcomesByIP: [String: FakeRouteOutcome],
+        defaultOutcome: FakeRouteOutcome = .output("    interface: en0\n"),
+        callLog: FakeRouteCallLog? = nil
+    ) {
+        self.outcomesByIP = outcomesByIP
+        self.defaultOutcome = defaultOutcome
+        self.callLog = callLog
+    }
+
+    func runRouteGet(ip: String) throws -> String {
+        callLog?.append(ip)
+        let outcome = outcomesByIP[ip] ?? defaultOutcome
+        if let thrownError = outcome.thrownError {
+            throw thrownError
+        }
+        return outcome.output
     }
 }
 
@@ -474,5 +527,263 @@ struct MessageHandlerTests {
         let noIfaceMessage = noIface.error?.message ?? ""
         #expect(!noIfaceMessage.contains(rawMarker))
         #expect(noIfaceMessage == "Could not determine routing interface for this IP.")
+    }
+}
+
+// MARK: - Batch checkRoutes (Milestone 3)
+
+/// Batch Native Messaging action — sequential lookups, per-item errors, no shared globals.
+@Suite("MessageHandler.checkRoutes")
+struct MessageHandlerBatchTests {
+
+    @Test("existing checkRoute still succeeds alongside batch models")
+    func checkRouteStillWorks() throws {
+        let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: "    interface: en0\n"))
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoute","requestId":"single","ip":"1.1.1.1"}
+        """.utf8))
+        #expect(response.ok)
+        #expect(response.routeType == "DIRECT")
+        #expect(response.results == nil)
+    }
+
+    @Test("valid two-IP batch returns both results")
+    func validTwoIPBatch() throws {
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "1.1.1.1": .output("    interface: en0\n"),
+            "8.8.8.8": .output("    interface: utun4\n"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"batch-2","ips":["1.1.1.1","8.8.8.8"]}
+        """.utf8))
+
+        #expect(response.ok)
+        #expect(response.requestId == "batch-2")
+        let results = try #require(response.results)
+        #expect(results.count == 2)
+        #expect(results[0].ok)
+        #expect(results[0].ip == "1.1.1.1")
+        #expect(results[0].routeType == "DIRECT")
+        #expect(results[1].ok)
+        #expect(results[1].ip == "8.8.8.8")
+        #expect(results[1].routeType == "VPN")
+    }
+
+    @Test("input order is preserved in results")
+    func orderPreservation() throws {
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "8.8.8.8": .output("    interface: utun0\n"),
+            "1.1.1.1": .output("    interface: en0\n"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"order","ips":["8.8.8.8","1.1.1.1"]}
+        """.utf8))
+        let results = try #require(response.results)
+        #expect(results.map(\.ip) == ["8.8.8.8", "1.1.1.1"])
+    }
+
+    @Test("duplicate valid IPs are looked up once but each input gets a result")
+    func duplicateDeduplication() throws {
+        let log = FakeRouteCallLog()
+        let executor = FakeRouteMapExecutor(
+            outcomesByIP: ["1.1.1.1": .output("    interface: en0\n")],
+            callLog: log
+        )
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"dedupe","ips":["1.1.1.1","1.1.1.1"," 1.1.1.1 "]}
+        """.utf8))
+        let results = try #require(response.results)
+        #expect(results.count == 3)
+        #expect(results.allSatisfy { $0.ok && $0.routeType == "DIRECT" })
+        #expect(log.ips == ["1.1.1.1"])
+    }
+
+    @Test("empty ips list is rejected")
+    func emptyListRejected() {
+        let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: ""))
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"empty","ips":[]}
+        """.utf8))
+        #expect(!response.ok)
+        #expect(response.error?.code == HostErrorCode.emptyIPList)
+        #expect(response.requestId == "empty")
+    }
+
+    @Test("missing ips field is rejected")
+    func missingListRejected() throws {
+        let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: ""))
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"missing"}
+        """.utf8))
+        #expect(!response.ok)
+        #expect(response.error?.code == HostErrorCode.invalidIPList)
+        #expect(response.requestId == "missing")
+    }
+
+    @Test("oversized ips list is rejected before route lookup")
+    func oversizedListRejected() throws {
+        let log = FakeRouteCallLog()
+        let executor = FakeRouteMapExecutor(outcomesByIP: [:], callLog: log)
+        let handler = MessageHandler(routeExecutor: executor)
+        let ips = (0..<129).map { "1.1.1.\($0 % 250)" }
+        let ipsJSON = ips.map { "\"\($0)\"" }.joined(separator: ",")
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"big","ips":[\(ipsJSON)]}
+        """.utf8))
+        #expect(!response.ok)
+        #expect(response.error?.code == HostErrorCode.tooManyIPs)
+        #expect(log.ips.isEmpty)
+    }
+
+    @Test("invalid item produces per-item INVALID_IP without failing the batch")
+    func invalidItemPerItemError() throws {
+        let log = FakeRouteCallLog()
+        let executor = FakeRouteMapExecutor(
+            outcomesByIP: ["1.1.1.1": .output("    interface: en0\n")],
+            callLog: log
+        )
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"mix","ips":["not-an-ip","1.1.1.1"]}
+        """.utf8))
+        #expect(response.ok)
+        let results = try #require(response.results)
+        #expect(results.count == 2)
+        #expect(!results[0].ok)
+        #expect(results[0].error?.code == HostErrorCode.invalidIP)
+        #expect(results[1].ok)
+        #expect(log.ips == ["1.1.1.1"])
+    }
+
+    @Test("one route command failure does not fail other items")
+    func oneFailureDoesNotAbortBatch() throws {
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "1.1.1.1": .throwError(.nonZeroExit(status: 1, reason: .exit)),
+            "8.8.8.8": .output("    interface: en0\n"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"partial","ips":["1.1.1.1","8.8.8.8"]}
+        """.utf8))
+        #expect(response.ok)
+        let results = try #require(response.results)
+        #expect(!results[0].ok)
+        #expect(results[0].error?.code == HostErrorCode.routeCommandFailed)
+        #expect(results[1].ok)
+        #expect(results[1].routeType == "DIRECT")
+        #expect(results[0].error?.message == "Unable to execute route lookup.")
+        #expect(!(results[0].error?.message.contains("/sbin/route") ?? true))
+    }
+
+    @Test("missing interface for one item maps to INTERFACE_NOT_FOUND")
+    func missingInterfaceOneItem() throws {
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "1.1.1.1": .output("route to nowhere"),
+            "8.8.8.8": .output("    interface: bridge0\n"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"iface","ips":["1.1.1.1","8.8.8.8"]}
+        """.utf8))
+        let results = try #require(response.results)
+        #expect(results[0].error?.code == HostErrorCode.interfaceNotFound)
+        #expect(results[1].routeType == "DIRECT")
+    }
+
+    @Test("DIRECT VPN and UNKNOWN classifications in one batch")
+    func mixedRouteTypes() throws {
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "1.1.1.1": .output("    interface: en0\n"),
+            "2.2.2.2": .output("    interface: utun4\n"),
+            "3.3.3.3": .output("    interface: lo0\n"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"types","ips":["1.1.1.1","2.2.2.2","3.3.3.3"]}
+        """.utf8))
+        let results = try #require(response.results)
+        #expect(results.map(\.routeType) == ["DIRECT", "VPN", "UNKNOWN"])
+    }
+
+    @Test("batch requestId is preserved")
+    func batchRequestIdPreserved() throws {
+        let handler = MessageHandler(routeExecutor: FakeRouteExecutor(output: "    interface: en0\n"))
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"keep-me","ips":["1.1.1.1"]}
+        """.utf8))
+        #expect(response.requestId == "keep-me")
+    }
+
+    @Test("raw route output does not leak in batch item errors")
+    func batchNoRawLeak() throws {
+        let marker = "SECRET_BATCH_ROUTE_OUTPUT"
+        let executor = FakeRouteMapExecutor(outcomesByIP: [
+            "1.1.1.1": .output("no interface \(marker)"),
+        ])
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"leak","ips":["1.1.1.1"]}
+        """.utf8))
+        let results = try #require(response.results)
+        let message = results[0].error?.message ?? ""
+        #expect(!message.contains(marker))
+    }
+
+    @Test("route executor is called only for valid deduplicated IPs")
+    func executorOnlyForValidDeduped() throws {
+        let log = FakeRouteCallLog()
+        let executor = FakeRouteMapExecutor(
+            outcomesByIP: [
+                "1.1.1.1": .output("    interface: en0\n"),
+                "8.8.8.8": .output("    interface: utun4\n"),
+            ],
+            callLog: log
+        )
+        let handler = MessageHandler(routeExecutor: executor)
+        let response = handler.handle(data: Data("""
+        {"action":"checkRoutes","requestId":"calls","ips":["bad","1.1.1.1","8.8.8.8","1.1.1.1"]}
+        """.utf8))
+        #expect(response.ok)
+        #expect(log.ips == ["1.1.1.1", "8.8.8.8"])
+        #expect(response.results?.count == 4)
+    }
+}
+
+// MARK: - Live / framed smoke (environment-dependent observations)
+
+@Suite("checkRoutes live smoke")
+struct CheckRoutesLiveSmokeTests {
+
+    /// Uses the real `/sbin/route` executor. Interface and routeType are machine-dependent.
+    @Test("live batch for 1.1.1.1 and 185.138.255.20")
+    func liveTwoIPBatch() throws {
+        let handler = MessageHandler()
+        let requestJSON = """
+        {"action":"checkRoutes","requestId":"live-smoke","ips":["1.1.1.1","185.138.255.20"]}
+        """
+        let framed = try NativeMessagingFraming.encodeFramedMessage(Data(requestJSON.utf8))
+        let (payload, _) = try NativeMessagingFraming.decodeFramedMessage(from: framed)
+        let response = handler.handle(data: payload)
+
+        #expect(response.ok)
+        #expect(response.requestId == "live-smoke")
+        let results = try #require(response.results)
+        #expect(results.count == 2)
+
+        for item in results {
+            #expect(!item.ip.isEmpty)
+            // Environment-dependent observation (not a fixed expectation).
+            fputs(
+                "OBS live route: ip=\(item.ip) ok=\(item.ok) interface=\(item.interface ?? "null") routeType=\(item.routeType ?? "null")\n",
+                stderr
+            )
+            if item.ok {
+                #expect(item.interface != nil)
+                #expect(item.routeType == "DIRECT" || item.routeType == "VPN" || item.routeType == "UNKNOWN")
+            }
+        }
     }
 }

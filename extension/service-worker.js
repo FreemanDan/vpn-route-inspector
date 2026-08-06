@@ -4,6 +4,8 @@
  * Milestone 1: Side Panel → CHECK_ROUTE → Native Messaging → Swift host.
  * Milestone 2: optional HTTP/HTTPS host access + webRequest observation for one
  *              explicitly selected tab; metadata only in chrome.storage.session.
+ * Milestone 3: explicit CAPTURE_ANALYZE_ROUTES batch checkRoutes — never from
+ *              webRequest listeners. Route results are a current macOS snapshot.
  *
  * Critical hardening: never drop webRequest events solely because the in-memory
  * cache is still null after a service-worker restart. Always await authoritative
@@ -19,8 +21,18 @@ const Core = VriCaptureCore;
 /** Native Messaging host name registered in the Chrome manifest on disk. */
 const NATIVE_HOST_NAME = 'com.freemandan.vpn_route_inspector';
 
-/** Maximum time to wait for the native host response (milliseconds). */
+/** Maximum time to wait for a single-IP native host response (milliseconds). */
 const NATIVE_MESSAGE_TIMEOUT_MS = 15000;
+
+/** Batch checkRoutes may look up many IPs sequentially — allow more wall time. */
+const NATIVE_BATCH_TIMEOUT_MS = 120000;
+
+/**
+ * True while a CAPTURE_ANALYZE_ROUTES call is in flight.
+ * Only one route analysis may be active at a time.
+ * @type {boolean}
+ */
+let routeAnalysisInFlight = false;
 
 /** chrome.storage.session key for the single active-tab capture session. */
 const CAPTURE_SESSION_KEY = 'captureSession';
@@ -244,18 +256,13 @@ function recordWebRequestEvent(eventType, details) {
 }
 
 /**
- * Sends a structured route-check request to the Swift native host.
- * @param {string} ip
+ * Low-level Native Messaging send with requestId verification and timeout.
+ * @param {object} payload
+ * @param {string} requestId
+ * @param {number} timeoutMs
  * @returns {Promise<object>}
  */
-function checkRouteViaNativeHost(ip) {
-  const requestId = createRequestId();
-  const payload = {
-    action: 'checkRoute',
-    requestId,
-    ip,
-  };
-
+function sendNativeMessageVerified(payload, requestId, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer = null;
@@ -276,7 +283,7 @@ function checkRouteViaNativeHost(ip) {
       finish(() => {
         reject(new Error('Native host did not respond in time. Is it installed? Run scripts/doctor.sh.'));
       });
-    }, NATIVE_MESSAGE_TIMEOUT_MS);
+    }, timeoutMs);
 
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, payload, (response) => {
@@ -306,6 +313,35 @@ function checkRouteViaNativeHost(ip) {
       });
     }
   });
+}
+
+/**
+ * Sends a structured single-IP route-check request to the Swift native host.
+ * @param {string} ip
+ * @returns {Promise<object>}
+ */
+function checkRouteViaNativeHost(ip) {
+  const requestId = createRequestId();
+  return sendNativeMessageVerified(
+    { action: 'checkRoute', requestId, ip },
+    requestId,
+    NATIVE_MESSAGE_TIMEOUT_MS
+  );
+}
+
+/**
+ * One batch Native Messaging call for unique IPv4s (Milestone 3).
+ * Never invoke sendNativeMessage once per IP from the capture pipeline.
+ * @param {string[]} ips
+ * @returns {Promise<object>}
+ */
+function checkRoutesViaNativeHost(ips) {
+  const requestId = createRequestId();
+  return sendNativeMessageVerified(
+    { action: 'checkRoutes', requestId, ips },
+    requestId,
+    NATIVE_BATCH_TIMEOUT_MS
+  ).then((response) => ({ requestId, response }));
 }
 
 /**
@@ -395,6 +431,8 @@ async function handleCaptureStart(message) {
     stoppedAt: null,
     entries: [],
     diagnostics,
+    // CAPTURE_START always resets prior route analysis.
+    routeAnalysis: Core.emptyRouteAnalysis(),
   };
 
   // Persist completely, then read back and verify before acknowledging success.
@@ -457,6 +495,8 @@ async function handleCaptureClear() {
       ...current,
       entries: [],
       diagnostics: diag,
+      // CAPTURE_CLEAR resets route analysis with the cleared evidence.
+      routeAnalysis: Core.emptyRouteAnalysis(),
     };
   });
   const finalSession = session || await loadSessionFromStorage();
@@ -512,6 +552,177 @@ async function handleCheckRoute(message) {
       'NATIVE_HOST_ERROR',
       err instanceof Error ? err.message : String(err)
     );
+  }
+}
+
+/**
+ * CAPTURE_ANALYZE_ROUTES — explicit user action only.
+ * Loads session → unique IPv4s → one checkRoutes batch → diagnose → store.
+ * Guards against concurrent analysis and stale writes after capture changes.
+ * @returns {Promise<object>}
+ */
+async function handleCaptureAnalyzeRoutes() {
+  if (routeAnalysisInFlight) {
+    return fail(
+      'ALREADY_ANALYZING',
+      'A route analysis is already in progress. Wait for it to finish.'
+    );
+  }
+
+  routeAnalysisInFlight = true;
+  const analysisStartedAt = Date.now();
+
+  try {
+    const session = await loadSessionFromStorage();
+    if (!Array.isArray(session.entries) || session.entries.length === 0) {
+      return fail('NO_CAPTURE_ENTRIES', 'Capture some responses before analyzing routes.');
+    }
+
+    const extracted = Core.extractUniqueIPv4s(session.entries);
+    if (extracted.ips.length === 0) {
+      return fail(
+        'NO_IPV4',
+        'No captured IPv4 addresses are available to analyze. IPv6 and missing-IP entries cannot be route-classified yet.'
+      );
+    }
+
+    const fingerprint = Core.buildSourceFingerprint(session, extracted.ips);
+
+    // Mark running in storage so the Side Panel can show progress.
+    const running = Core.emptyRouteAnalysis();
+    running.state = 'running';
+    running.startedAt = analysisStartedAt;
+    running.sourceFingerprint = fingerprint;
+    running.uniqueIPv4Count = extracted.ips.length;
+    running.skippedIPv6Count = extracted.skippedIPv6Count;
+    running.skippedMissingIpCount = extracted.skippedMissingIpCount;
+    await saveSession({ ...session, routeAnalysis: running });
+    captureLog('route analysis started', {
+      uniqueIPv4: extracted.ips.length,
+      skippedIPv6: extracted.skippedIPv6Count,
+      skippedMissingIp: extracted.skippedMissingIpCount,
+    });
+
+    let nativeBundle;
+    try {
+      nativeBundle = await checkRoutesViaNativeHost(extracted.ips);
+    } catch (err) {
+      const errSession = await loadSessionFromStorage();
+      const errored = Core.emptyRouteAnalysis();
+      errored.state = 'error';
+      errored.startedAt = analysisStartedAt;
+      errored.completedAt = Date.now();
+      errored.sourceFingerprint = fingerprint;
+      errored.uniqueIPv4Count = extracted.ips.length;
+      errored.skippedIPv6Count = extracted.skippedIPv6Count;
+      errored.skippedMissingIpCount = extracted.skippedMissingIpCount;
+      errored.error = {
+        code: 'NATIVE_HOST_ERROR',
+        message: err instanceof Error ? err.message : String(err),
+      };
+      await saveSession({ ...errSession, routeAnalysis: errored });
+      return fail('NATIVE_HOST_ERROR', errored.error.message);
+    }
+
+    const nativeResponse = nativeBundle.response;
+    if (!nativeResponse.ok) {
+      const topErr = nativeResponse.error || {};
+      const errSession = await loadSessionFromStorage();
+      const errored = Core.emptyRouteAnalysis();
+      errored.state = 'error';
+      errored.startedAt = analysisStartedAt;
+      errored.completedAt = Date.now();
+      errored.sourceFingerprint = fingerprint;
+      errored.uniqueIPv4Count = extracted.ips.length;
+      errored.skippedIPv6Count = extracted.skippedIPv6Count;
+      errored.skippedMissingIpCount = extracted.skippedMissingIpCount;
+      errored.error = {
+        code: typeof topErr.code === 'string' ? topErr.code : 'NATIVE_HOST_ERROR',
+        message: typeof topErr.message === 'string' ? topErr.message : 'Batch route check failed.',
+      };
+      await saveSession({ ...errSession, routeAnalysis: errored });
+      return fail(errored.error.code, errored.error.message);
+    }
+
+    const validated = Core.validateNativeRouteResults(nativeResponse.results, extracted.ips);
+    if (!validated.ok) {
+      const errSession = await loadSessionFromStorage();
+      const errored = Core.emptyRouteAnalysis();
+      errored.state = 'error';
+      errored.startedAt = analysisStartedAt;
+      errored.completedAt = Date.now();
+      errored.sourceFingerprint = fingerprint;
+      errored.uniqueIPv4Count = extracted.ips.length;
+      errored.error = validated.error;
+      await saveSession({ ...errSession, routeAnalysis: errored });
+      return fail(validated.error.code, validated.error.message);
+    }
+
+    // Stale-write protection: reload authoritative session before storing.
+    const latest = await loadSessionFromStorage();
+    const latestExtracted = Core.extractUniqueIPv4s(latest.entries);
+    const latestFingerprint = Core.buildSourceFingerprint(latest, latestExtracted.ips);
+
+    if (!Core.fingerprintsMatch(fingerprint, latestFingerprint)) {
+      // Do not overwrite with diagnosis built from a superseded capture set.
+      const marked = Core.emptyRouteAnalysis();
+      marked.state = 'stale';
+      marked.startedAt = analysisStartedAt;
+      marked.completedAt = Date.now();
+      marked.sourceFingerprint = fingerprint;
+      marked.uniqueIPv4Count = extracted.ips.length;
+      marked.skippedIPv6Count = extracted.skippedIPv6Count;
+      marked.skippedMissingIpCount = extracted.skippedMissingIpCount;
+      marked.results = validated.results;
+      marked.error = {
+        code: 'STALE_ANALYSIS',
+        message: 'Capture data changed while route analysis was running. Re-analyze routes.',
+      };
+      // Preserve a newer completed analysis if one already finished.
+      if (latest.routeAnalysis
+        && latest.routeAnalysis.state === 'complete'
+        && latest.routeAnalysis.completedAt
+        && latest.routeAnalysis.completedAt > analysisStartedAt) {
+        captureLog('stale analysis discarded — newer complete analysis present');
+        return fail(
+          'STALE_ANALYSIS',
+          'Capture data changed while analysis was running. A newer analysis is already stored.'
+        );
+      }
+      await saveSession({ ...latest, routeAnalysis: marked });
+      return fail('STALE_ANALYSIS', marked.error.message);
+    }
+
+    // Do not overwrite a newer completed analysis with an older in-flight response.
+    if (latest.routeAnalysis
+      && latest.routeAnalysis.state === 'complete'
+      && typeof latest.routeAnalysis.completedAt === 'number'
+      && latest.routeAnalysis.completedAt > analysisStartedAt) {
+      captureLog('older in-flight analysis discarded');
+      return fail(
+        'STALE_ANALYSIS',
+        'A newer route analysis completed while this one was still running.'
+      );
+    }
+
+    const analysis = Core.buildRouteAnalysis(latest, validated.results);
+    analysis.startedAt = analysisStartedAt;
+    analysis.completedAt = Date.now();
+    analysis.sourceFingerprint = fingerprint;
+    await saveSession({ ...latest, routeAnalysis: analysis });
+    captureLog('route analysis complete', {
+      uniqueIPv4: analysis.uniqueIPv4Count,
+      candidates: analysis.candidateExclusionIps.length,
+      findings: analysis.findings.length,
+    });
+
+    return ok({
+      session: await loadSessionFromStorage(),
+      summary: Core.summarizeSession(latest),
+      routeAnalysis: analysis,
+    });
+  } finally {
+    routeAnalysisInFlight = false;
   }
 }
 
@@ -643,6 +854,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       break;
     case 'CAPTURE_REVOKE_HOSTS':
       task = handleCaptureRevokeHosts();
+      break;
+    case 'CAPTURE_ANALYZE_ROUTES':
+      task = handleCaptureAnalyzeRoutes();
       break;
     default:
       return false;

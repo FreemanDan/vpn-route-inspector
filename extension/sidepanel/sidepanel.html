@@ -10,28 +10,8 @@
   <main class="container">
     <header class="header">
       <h1 class="title">VPN Route Inspector</h1>
-      <p class="subtitle">Side Panel — manual route check and active-tab capture.</p>
+      <p class="subtitle">Split-tunnel diagnosis from captured remote IPv4 routes.</p>
     </header>
-
-    <section class="panel" aria-labelledby="route-heading">
-      <h2 id="route-heading" class="panel-title">Manual route check</h2>
-      <p class="panel-note">Ask the local native host which macOS interface routes an IPv4 address.</p>
-
-      <label class="label" for="ip-input">IPv4 address</label>
-      <input
-        id="ip-input"
-        class="input"
-        type="text"
-        value="1.1.1.1"
-        placeholder="1.1.1.1"
-        autocomplete="off"
-        spellcheck="false"
-      >
-      <button id="check-btn" class="btn" type="button">Check route</button>
-
-      <section id="status" class="status hidden" aria-live="polite"></section>
-      <section id="result" class="result hidden" aria-live="polite"></section>
-    </section>
 
     <section class="panel" aria-labelledby="capture-heading">
       <h2 id="capture-heading" class="panel-title">Active tab capture</h2>
@@ -81,13 +61,61 @@
         <p id="capture-message" class="capture-message hidden"></p>
       </section>
 
+      <div class="btn-row analysis-actions">
+        <button id="analyze-routes-btn" class="btn btn-primary" type="button">Analyze captured routes</button>
+        <button id="copy-candidates-btn" class="btn btn-secondary" type="button" disabled>Copy candidate IPs</button>
+      </div>
+      <p id="analyze-progress" class="analyze-progress hidden" aria-live="polite"></p>
+      <p id="copy-feedback" class="copy-feedback hidden" aria-live="polite"></p>
+
+      <section id="route-analysis" class="route-analysis hidden" aria-labelledby="analysis-heading">
+        <h2 id="analysis-heading" class="panel-title">Route analysis</h2>
+        <p class="route-snapshot-warning">
+          Route classification is a snapshot of the current macOS routing table.
+          It may differ from the route used by an already established browser
+          connection.
+        </p>
+        <p id="analysis-state-line" class="analysis-state-line"></p>
+        <div id="analysis-summary" class="analysis-summary"></div>
+        <p id="analysis-network-change-note" class="panel-note hidden"></p>
+
+        <h3 class="section-title">Problematic routes</h3>
+        <div id="problematic-routes" class="problematic-routes"></div>
+
+        <h3 class="section-title">Hostname / IP groups</h3>
+        <div id="analysis-groups" class="analysis-groups"></div>
+      </section>
+
       <details id="capture-diagnostics" class="diagnostics">
         <summary>Capture diagnostics</summary>
         <dl id="capture-diagnostics-body" class="diagnostics-body"></dl>
       </details>
 
-      <div id="capture-results" class="capture-results" aria-live="polite"></div>
+      <details id="raw-capture-details" class="raw-capture-details">
+        <summary>Raw captured responses (technical detail)</summary>
+        <div id="capture-results" class="capture-results" aria-live="polite"></div>
+      </details>
     </section>
+
+    <details class="panel manual-tools" aria-labelledby="route-heading">
+      <summary id="route-heading" class="panel-title">Manual tools</summary>
+      <p class="panel-note">Ask the local native host which macOS interface currently routes a single IPv4 address.</p>
+
+      <label class="label" for="ip-input">IPv4 address</label>
+      <input
+        id="ip-input"
+        class="input"
+        type="text"
+        value="1.1.1.1"
+        placeholder="1.1.1.1"
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <button id="check-btn" class="btn" type="button">Check route</button>
+
+      <section id="status" class="status hidden" aria-live="polite"></section>
+      <section id="result" class="result hidden" aria-live="polite"></section>
+    </details>
   </main>
 
   <script src="sidepanel.js"></script>

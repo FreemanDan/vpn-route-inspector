@@ -12,28 +12,30 @@ When a VPN client uses split tunneling, only some traffic is routed through the 
 4. The site may return **HTTP 403** when the request reaches it through the VPN path.
 5. After route changes, Chrome may keep stale HTTP/2, QUIC, DNS, Service Worker, or socket state — a **full browser restart** (Command+Q) may be required.
 
-VPN Route Inspector helps you see **which macOS interface actually routes a given IP** so you can prepare accurate VPN exclusion lists.
+VPN Route Inspector helps you see **which remote IPv4 Chrome actually used**, **how macOS currently routes those IPs**, and **which IPs are strong candidates for VPN exclusions**.
 
 ## Current milestone scope
 
-**Milestone 1 (complete):** manual IPv4 route check via Native Messaging.
+**Milestone 1 (complete):** manual IPv4 route check via Native Messaging (`checkRoute`).
 
-**Milestone 2 (current):** user-controlled capture of network **responses** for one active HTTP/HTTPS tab. Primary UI is the Chrome **Side Panel** (opens from the extension action).
+**Milestone 2 (complete):** user-controlled capture of network responses for one active HTTP/HTTPS tab (Chrome Side Panel + `chrome.storage.session`).
+
+**Milestone 3 (current):** explicit batch route analysis of captured unique IPv4s (`checkRoutes`) and split-tunnel diagnosis.
 
 ```
 Side Panel → service worker → chrome.webRequest (one tab)
-                            ↘ chrome.storage.session (metadata + diagnostics)
+                            ↘ chrome.storage.session (metadata + diagnostics + routeAnalysis)
 
-Side Panel → service worker → Native Messaging → Swift host → /sbin/route
+Side Panel → Analyze captured routes → CAPTURE_ANALYZE_ROUTES
+           → one Native Messaging checkRoutes batch → Swift host → /sbin/route (sequential)
+           → diagnostic findings + candidate exclusion IPs
 ```
 
-Remote IPs come from Chrome `webRequest` response metadata (`details.ip`), **not** from DNS. The IP may be missing or IPv6 — **entries are still stored** when IP is absent (cache/QUIC). Cross-origin subresources require optional HTTP/HTTPS host access, requested only after you click **Start capture and reload**, then verified with `permissions.contains`. `activeTab` alone is not enough for all CDN/API traffic.
+Remote IPs come from Chrome `webRequest` response metadata (`details.ip`), **not** from DNS. Route classification uses `/sbin/route -n get` at **analysis time** — a snapshot of the current macOS routing table, not packet capture of the earlier connection.
 
-The service worker recovers the active session from `chrome.storage.session` after MV3 worker restarts so reload traffic is not dropped. Storage updates are serialized through a recoverable Promise queue. Captured metadata stays in session memory (max 500 entries) with compact **Capture diagnostics** counters to distinguish “no events”, wrong-tab filtering, and storage failures.
+**No route check runs inside webRequest listeners.** Analysis starts only when you click **Analyze captured routes** (or **Re-analyze routes**).
 
-Bodies, headers, cookies, and authorization values are **not** captured. URLs may still contain path/query data — use capture only for intentional diagnostics. Automatic VPN/DIRECT classification of captured IPs is **not** in this pass. The stable extension `key` / ID must remain unchanged.
-
-After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) before trusting new manual route-check results.
+IPv6 entries remain visible but are labelled **Route analysis not supported yet**. Bodies, headers, cookies, and authorization values are **not** captured. The stable extension `key` / ID must remain unchanged.
 
 ## Prerequisites
 
@@ -42,27 +44,17 @@ After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) 
 - Google Chrome
 - An active network connection
 
-Full Xcode is **not** required for this command-line project. Unit tests use **Swift Testing** (the `Testing` module from the toolchain), not XCTest. There is no XCTest dependency and no fallback test runner.
-
-No Node.js, npm, Python, or Homebrew dependencies are required for build, installation, diagnostics, or runtime.
+Full Xcode is **not** required. Unit tests use **Swift Testing**, not XCTest. No Node.js, npm, Python, or Homebrew dependencies for build, installation, diagnostics, or runtime.
 
 ## Stable extension identity
 
-The extension has a committed public key in `extension/manifest.json` (`key`). That gives every clone the **same stable development extension ID**, independent of the repository path on disk.
-
-- The public key is committed.
-- The private PEM key lives **outside** the repository at:
-
-  `$HOME/.config/vpn-route-inspector/chrome-extension.pem`
-
-- **Back up that private key securely.** Never commit `*.pem` or `*.crx`.
-- Do not remove or regenerate the public `key` casually — that would change the stable ID and break Native Messaging until reinstall.
-
-Expected stable ID:
+Expected stable ID (committed public `key` in `extension/manifest.json`):
 
 ```
 iipnohegjdidiffjfhlccfbpbjeeicba
 ```
+
+Private PEM: `$HOME/.config/vpn-route-inspector/chrome-extension.pem` (never commit).
 
 ## One-time setup
 
@@ -71,112 +63,69 @@ chmod +x scripts/*.sh
 ./scripts/setup.sh
 ```
 
-This runs `build-host.sh` → `install-host.sh` → `doctor.sh`, prints the stable extension ID, and prints the absolute `extension/` path to load in Chrome.
+Then load / reload the unpacked `extension/` folder at `chrome://extensions/` and confirm the ID. Fully quit Chrome with **Command+Q** after native host install changes.
 
-Then load the unpacked extension **once** (or **Reload** it on `chrome://extensions` after extension source updates):
+## Split-tunnel diagnosis (Milestone 3)
 
-1. Open Chrome and go to `chrome://extensions/`.
-2. Enable **Developer mode** (top right).
-3. Click **Load unpacked** (first time) or **Reload**.
-4. Select / confirm the repository’s `extension/` folder.
-5. Confirm the ID is still `iipnohegjdidiffjfhlccfbpbjeeicba`.
+1. Wait until VPN/network state is stable.
+2. Open Side Panel → **Start capture and reload** on Wildberries, Ozon, or similar.
+3. Stop capture after the page settles.
+4. Click **Analyze captured routes**.
+5. Review the **Route analysis** summary (Unique IPv4 / VPN / DIRECT / UNKNOWN).
+6. Inspect **Problematic routes** (ERROR VIA VPN, MIXED ROUTING, …).
+7. Click **Copy candidate IPs** for newline-separated exclusion candidates only.
+8. Optional: change a VPN exclusion, reconnect VPN, **Re-analyze routes** and confirm the current route snapshot changed.
+9. Manual **Check route** remains under **Manual tools**.
 
-Fully quit Chrome with **Command+Q** and reopen it after the native host manifest is installed or changed.
+### Diagnostic categories
 
-Manual pasting of an ID from `chrome://extensions` is not part of this workflow, and `install-host.sh` takes no ID argument.
+| Category | Meaning | Candidate IP? |
+|----------|---------|---------------|
+| `ERROR_VIA_VPN` | Captured IPv4 routes VPN **and** HTTP 4xx/5xx or network error | Yes |
+| `MIXED_ROUTING` | Same hostname has both DIRECT and VPN IPv4s | VPN-side IPs |
+| `ERROR_VIA_DIRECT` | Failure while current route is already DIRECT | No |
+| `VPN_WITHOUT_ERROR` | VPN route, no failure observed | No (unless also MIXED) |
+| `UNCLASSIFIED_ERROR` | Failure without usable IPv4 route classification | No |
 
-## Normal updates
+`net::ERR_NETWORK_CHANGED` events without an IP are preserved and counted, aggregated in the summary, and **never** become exclusion candidates. They are not interpreted as a blocked VPN destination.
 
-| What changed | What to do |
-|--------------|------------|
-| Extension JS/HTML/CSS | On `chrome://extensions`, click **Reload** for VPN Route Inspector |
-| Native host binary | Re-run `./scripts/setup.sh` (or `build-host.sh` + `install-host.sh`), then **Command+Q** Chrome |
-| Native Messaging manifest / allowed origin | Re-run `./scripts/install-host.sh` or `./scripts/setup.sh`, then **Command+Q** Chrome |
+### Stale analysis
+
+`CAPTURE_START`, `CAPTURE_CLEAR`, and revoke reset analysis. New captured entries after a completed analysis mark it **stale**. Stop capture keeps completed analysis. Only one analysis runs at a time (`ALREADY_ANALYZING`). In-flight results are discarded if the capture IPv4 set / session identity changed.
 
 ## Active tab capture (Milestone 2)
 
-1. Open a normal `http:` / `https:` page (for example Wildberries, Ozon, or Yandex Market).
-2. Click the extension action to open the **Side Panel** (keep it open across reload).
-3. Click **Start capture and reload**.
-4. Accept the optional host-access prompt if Chrome shows it.
-5. Confirm State = Active, then watch Entries / diagnostics update as the tab reloads.
-6. Inspect hostname, remote IP (or **No IP**), status, resource type, method, and CACHE markers.
-7. If Entries stays 0, expand **Capture diagnostics** and note `events seen`, `wrong-tab`, `storage failures`, and `last ignored reason`.
-8. Use **Stop capture**, **Clear results**, or **Revoke network access** as needed.
+1. Open a normal `http:` / `https:` page.
+2. Open the **Side Panel**.
+3. **Start capture and reload** (optional host access from that click).
+4. Watch entries / diagnostics; expand **Raw captured responses** for technical detail.
+5. **Stop** / **Clear** / **Revoke** as needed.
 
-Requests from other tabs must not appear. Manual **Check route** remains available in the same Side Panel.
-
-## Build the native host only
-
-Swift Package Manager is the **only** supported build path. There is no fallback build. Unit tests run through SwiftPM via `swift test`. If `swift test` or `swift build -c release` fails, the build fails visibly.
+## Build / install / doctor
 
 ```bash
-./scripts/build-host.sh
+./scripts/build-host.sh    # swift test + release → native-host/dist/vpn-route-host
+./scripts/install-host.sh  # stable ID from scripts/extension-id.sh
+./scripts/doctor.sh
 ```
 
-The script runs:
-
-1. `swift test` (Swift Testing via SwiftPM — one test path only)
-2. `swift build -c release`
-3. Copies the release executable to the canonical artifact:
-
-```
-native-host/dist/vpn-route-host
-```
-
-Install and doctor scripts use **only** that path.
-
-## Install the native host only
-
-```bash
-./scripts/install-host.sh
-```
-
-No arguments. The installer derives the stable ID from `extension/manifest.json` via `scripts/extension-id.sh` and writes exactly one `allowed_origins` entry (no wildcards):
-
-```
-chrome-extension://<stable-id>/
-```
-
-This installs:
-
-- Binary: `~/Library/Application Support/VpnRouteInspector/vpn-route-host`
-- Manifest: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json`
-
-Restart Chrome completely (Command+Q, then reopen) after installation or manifest changes.
+Swift Package Manager is the only supported build path. No fallback build.
 
 ## Manual route check
 
-Chrome Native Messaging is ready when:
-
-1. `./scripts/setup.sh` (or build + install + doctor) has succeeded,
-2. The unpacked `extension/` directory is loaded in Chrome,
-3. Chrome has been fully restarted (Command+Q) after the latest native host install,
-4. The popup **Check route** test succeeds.
-
-Then:
-
-1. Click the VPN Route Inspector toolbar icon.
-2. Leave the default IP `1.1.1.1` or enter another IPv4 address.
-3. Click **Check route**.
-
-### Expected results
+Under **Manual tools** in the Side Panel (or via `CHECK_ROUTE`):
 
 | VPN state | Typical interface | Route type |
 |-----------|-------------------|------------|
 | VPN off   | `en0` (or `en1`)  | `DIRECT`   |
-| VPN on, IP not excluded | `utun4` (or similar) | `VPN` |
-| VPN on, IP excluded     | `en0`             | `DIRECT`   |
-
-Run `./scripts/doctor.sh` if native messaging fails. Doctor verifies that the installed `allowed_origins` matches the stable ID from the committed key.
+| VPN on, IP not excluded | `utun*` | `VPN` |
+| VPN on, IP excluded     | `en0`   | `DIRECT`   |
 
 ## Uninstall
 
 ```bash
 ./scripts/uninstall-host.sh
 ```
-
-Remove the extension from `chrome://extensions/` manually if desired.
 
 ## Project layout
 

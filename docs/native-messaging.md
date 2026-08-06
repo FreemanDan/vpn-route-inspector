@@ -16,38 +16,18 @@ com.freemandan.vpn_route_inspector
 
 Generated locally by `scripts/install-host.sh` (ID from `scripts/extension-id.sh`) — **never committed**.
 
-The installer takes **no** extension-ID argument. It derives the stable development ID from the committed public `key` in `extension/manifest.json`. `allowed_origins` contains exactly one origin — no wildcards and no manually pasted IDs:
-
-```json
-{
-  "name": "com.freemandan.vpn_route_inspector",
-  "description": "VPN Route Inspector native host for macOS route lookups",
-  "path": "/absolute/path/to/vpn-route-host",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://<stable-id-from-manifest-key>/"
-  ]
-}
-```
-
-The stable ID does **not** depend on the repository path. The private PEM key stays outside the repo (`$HOME/.config/vpn-route-inspector/chrome-extension.pem`) and must be backed up; never commit it.
+`allowed_origins` contains exactly one origin derived from the committed public `key` in `extension/manifest.json` — no wildcards.
 
 ## Binary framing protocol
-
-All messages on stdin/stdout use Chrome's standard framing:
 
 | Field | Size | Encoding |
 |-------|------|----------|
 | Length | 4 bytes | little-endian unsigned integer |
 | Payload | `length` bytes | UTF-8 JSON object |
 
-The host rejects zero-length or oversized (> 1 MiB) incoming messages.
+Max payload 1 MiB. **stdout** is reserved for framed JSON only. Logs go to **stderr**.
 
-**Important:** stdout must contain **only** framed JSON responses. All logging goes to stderr.
-
-## Request schema
-
-### `checkRoute`
+## Request: `checkRoute` (Milestone 1, backward compatible)
 
 ```json
 {
@@ -57,15 +37,7 @@ The host rejects zero-length or oversized (> 1 MiB) incoming messages.
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `action` | string | yes | Must be `"checkRoute"` |
-| `requestId` | string | no | Correlation ID echoed in response |
-| `ip` | string | yes | IPv4 address to look up |
-
-## Response schema
-
-### Success (direct)
+### Success
 
 ```json
 {
@@ -77,17 +49,7 @@ The host rejects zero-length or oversized (> 1 MiB) incoming messages.
 }
 ```
 
-### Success (VPN)
-
-```json
-{
-  "ok": true,
-  "requestId": "uuid-or-generated-id",
-  "ip": "1.1.1.1",
-  "interface": "utun4",
-  "routeType": "VPN"
-}
-```
+`results` is omitted for single-IP success.
 
 ### Error
 
@@ -102,20 +64,86 @@ The host rejects zero-length or oversized (> 1 MiB) incoming messages.
 }
 ```
 
-## Error codes
+## Request: `checkRoutes` (Milestone 3)
+
+One Native Messaging call for many IPv4s. The extension must batch unique captured IPv4s — never call once per captured event.
+
+```json
+{
+  "action": "checkRoutes",
+  "requestId": "uuid",
+  "ips": [
+    "185.138.255.20",
+    "87.250.250.22"
+  ]
+}
+```
+
+### Validation (top-level, before any `/sbin/route`)
+
+| Rule | Error code |
+|------|------------|
+| `ips` missing / not an array | `INVALID_IP_LIST` |
+| `ips` empty | `EMPTY_IP_LIST` |
+| more than 128 input items | `TOO_MANY_IPS` |
+
+### Success (batch)
+
+Top-level `ok: true` even when some items fail. Every input position gets an explicit result. Valid IPv4s are trimmed and deduplicated for Process execution (first-seen order preserved in the result list). Lookups run **sequentially**.
+
+```json
+{
+  "ok": true,
+  "requestId": "same-uuid",
+  "results": [
+    {
+      "ok": true,
+      "ip": "185.138.255.20",
+      "interface": "utun4",
+      "routeType": "VPN",
+      "error": null
+    },
+    {
+      "ok": false,
+      "ip": "192.0.2.999",
+      "interface": null,
+      "routeType": null,
+      "error": {
+        "code": "INVALID_IP",
+        "message": "A valid IPv4 address is required."
+      }
+    }
+  ]
+}
+```
+
+### Per-item error codes
+
+| Code | Meaning |
+|------|---------|
+| `INVALID_IP` | That list item is not a valid IPv4 |
+| `ROUTE_COMMAND_FAILED` | `/sbin/route` failed for that IP |
+| `INTERFACE_NOT_FOUND` | Route output missing `interface:` |
+
+Raw route stdout/stderr never appears in public error messages.
+
+## Shared error codes
 
 | Code | Meaning |
 |------|---------|
 | `INVALID_JSON` | Request body is not valid JSON |
 | `INVALID_ACTION` | Unknown `action` value |
-| `INVALID_IP` | Missing or invalid IPv4 address |
+| `INVALID_IP` | Missing or invalid IPv4 (single or per-item) |
+| `INVALID_IP_LIST` | Batch `ips` missing / invalid |
+| `EMPTY_IP_LIST` | Batch `ips` is empty |
+| `TOO_MANY_IPS` | Batch `ips` longer than 128 |
 | `ROUTE_COMMAND_FAILED` | Could not execute `/sbin/route` |
-| `INTERFACE_NOT_FOUND` | Route output missing `interface:` field |
+| `INTERFACE_NOT_FOUND` | Route output missing `interface:` |
 | `INTERNAL_ERROR` | Unexpected host failure |
 
 ## Extension-side usage
 
-The service worker calls:
+Single IP:
 
 ```javascript
 chrome.runtime.sendNativeMessage(
@@ -125,20 +153,26 @@ chrome.runtime.sendNativeMessage(
 );
 ```
 
-Chrome handles process lifecycle: it starts `vpn-route-host`, writes the framed request to stdin, reads the framed response from stdout, and terminates the host.
+Batch (Milestone 3 — from `CAPTURE_ANALYZE_ROUTES` only):
 
-The service worker verifies that the native host echoes the same `requestId` that was sent.
+```javascript
+chrome.runtime.sendNativeMessage(
+  'com.freemandan.vpn_route_inspector',
+  { action: 'checkRoutes', requestId, ips },
+  callback
+);
+```
+
+The service worker verifies that the native host echoes the same `requestId`.
+
+## Route result meaning
+
+`interface` / `routeType` describe the **current** macOS routing table at the moment of the lookup. They are not a historical packet-capture proof of which path an earlier browser connection used.
 
 ## Build artifact
-
-The installed binary comes from the canonical SwiftPM output copied by `./scripts/build-host.sh`:
 
 ```
 native-host/dist/vpn-route-host
 ```
 
-There is no alternate manual build path. Framing encode/decode is covered by Swift Testing unit tests under `native-host/Tests/` and executed with `swift test` (SwiftPM only — no XCTest, no fallback runner).
-
-## Milestone 2 note
-
-Active-tab capture uses `chrome.webRequest` and `chrome.storage.session` inside the extension only. It does **not** change this Native Messaging protocol, the Swift `checkRoute` API, or send captured IPs to the native host. Automatic route classification of captured addresses is a later milestone.
+Produced only by SwiftPM via `./scripts/build-host.sh` (`swift test` then release build).

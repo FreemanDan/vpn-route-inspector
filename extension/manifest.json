@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VPN Route Inspector",
-  "version": "0.2.1",
-  "description": "Local diagnostic tool for macOS split-tunnel VPN route inspection.",
+  "version": "0.3.0",
+  "description": "Local diagnostic tool for macOS split-tunnel VPN route inspection and captured IPv4 batch analysis.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwn/HsN89t8kb9F+TNz6Lmm9tOX+1HQM4arO7BStIMTvdEFYusDRN96Y+8bq3ur4iktCIQ045+dVmzvJc3v6iUKOsNVvmzFjKLYArf+d0N1iDUvYpwavRdfLwb2hok/7u3Fq0+QvA8LpaQe3I/kGKk0U9+0UKd0ThAbw5TlywFX675riLjqBe/GyOsb5afOlr1rNspOXjN7Qlof1TDN5kv6qEqIRE1JU+hnlGkJrjlCPzb2BGFMraanKLRv8CJLdbWxXMH74/f28K9sg0Pnf3uWC27AYjARlfZHM2i6f+NbW6u5CCKKXu1jBLheAb65AY6v5SCJFkjV9s+feeAUirxQIDAQAB",
   "permissions": [
     "nativeMessaging",

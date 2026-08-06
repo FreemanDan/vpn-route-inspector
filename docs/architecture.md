@@ -2,28 +2,32 @@
 
 VPN Route Inspector is a local diagnostic stack composed of a Chrome extension and a macOS native host.
 
-- **Milestone 1 (complete):** manual IPv4 route lookup via Native Messaging.
-- **Milestone 2 (current):** user-controlled response capture for one HTTP/HTTPS tab via non-blocking `webRequest`, with the Chrome **Side Panel** as the primary UI. Captured IPs are **not** auto route-checked yet. Entries are stored even when Chrome omits `details.ip`. The worker recovers session state from `storage.session` after restarts so reload traffic is not dropped.
+- **Milestone 1 (complete):** manual IPv4 route lookup via Native Messaging (`checkRoute`).
+- **Milestone 2 (complete):** user-controlled response capture for one HTTP/HTTPS tab via non-blocking `webRequest`, Side Panel UI, `chrome.storage.session`.
+- **Milestone 3 (current):** explicit batch route analysis (`checkRoutes`) and pure split-tunnel diagnosis. **No** route check inside webRequest listeners.
+
+## Interpretation boundary
+
+`/sbin/route -n get` reports the **current** macOS route at analysis time. It does not cryptographically prove which route a previously completed TCP/QUIC connection used. Results are strong evidence when Chrome observed a remote IPv4, the current route is VPN, and the capture shows HTTP/network errors — **not** packet capture.
 
 ## High-level flow (Milestone 1 — manual route check)
 
 ```mermaid
 sequenceDiagram
-    participant Popup as Extension Popup
+    participant Panel as Side Panel
     participant SW as Service Worker
     participant NM as Chrome Native Messaging
     participant Host as Swift Native Host
     participant Route as /sbin/route
 
-    Popup->>SW: chrome.runtime.sendMessage(CHECK_ROUTE)
+    Panel->>SW: chrome.runtime.sendMessage(CHECK_ROUTE)
     SW->>NM: sendNativeMessage(checkRoute)
     NM->>Host: length-prefixed JSON (stdin)
     Host->>Route: Process(["-n","get",ip])
     Route-->>Host: route output
     Host-->>NM: length-prefixed JSON (stdout)
     NM-->>SW: structured response
-    SW-->>Popup: bridge response
-    Popup->>Popup: render result
+    SW-->>Panel: bridge response
 ```
 
 ## High-level flow (Milestone 2 — active-tab capture)
@@ -46,114 +50,85 @@ sequenceDiagram
     WR-->>SW: onResponseStarted / redirect / error
     SW->>Store: append entry + diagnostics (max 500)
     Store-->>Panel: storage.onChanged
-    Panel->>Panel: render entries live
+```
+
+## High-level flow (Milestone 3 — batch route analysis)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Panel as Side Panel
+    participant SW as Service Worker
+    participant Store as storage.session
+    participant NM as Native Messaging
+    participant Host as Swift host
+
+    User->>Panel: Analyze captured routes
+    Panel->>SW: CAPTURE_ANALYZE_ROUTES
+    SW->>Store: load session, extract unique IPv4
+    SW->>Store: routeAnalysis.state = running + fingerprint
+    SW->>NM: one checkRoutes batch
+    NM->>Host: sequential /sbin/route per unique IP
+    Host-->>SW: results[]
+    SW->>SW: validate + buildFindings
+    Note over SW: Reject stale write if fingerprint changed
+    SW->>Store: routeAnalysis complete
+    Store-->>Panel: summary + candidates
 ```
 
 ## Components
 
 ### Extension Side Panel (`extension/sidepanel/`)
 
-Primary UI (opens on action click via `chrome.sidePanel.setPanelBehavior`). Two sections:
+Primary UI. Product priority:
 
-1. **Manual route check** — IPv4 input → service worker → native host (Milestone 1).
-2. **Active tab capture** — start/stop/clear/revoke; live session metadata, diagnostics, and a scrollable result list (Milestone 2).
+1. Capture controls
+2. **Route analysis** summary / Problematic routes / hostname–IP groups / Copy candidate IPs
+3. Raw captured responses (collapsible, secondary)
+4. Manual tools (collapsible single-IP checker)
 
-The Side Panel never calls Native Messaging directly and never writes the capture session document. Capture rows use `createElement` / `textContent`.
+Captured and analysis values use `createElement` / `textContent`. Current-route snapshot warning is shown near analysis results.
 
-Optional HTTP/HTTPS host access is requested **only** from **Start capture and reload**, then verified with `permissions.contains`. Opening the panel does not request permissions. Pure capture logic lives in `extension/capture-core.js` (shared with the service worker and `jsc` tests).
+### Pure logic (`extension/capture-core.js`)
+
+Shared by the service worker and JavaScriptCore tests. Owns capture session normalization, unique IPv4 extraction, hostname→IP aggregation, finding categories, candidate exclusion ordering, fingerprints, and stale-state helpers. Diagnostic business rules must not live only in DOM code.
 
 ### Manifest V3 service worker (`extension/service-worker.js`)
 
-Background script registered in `manifest.json`. Responsibilities:
-
 | Action | Purpose |
 |--------|---------|
-| `CHECK_ROUTE` | Forward IPv4 lookup to the native host (unchanged) |
-| `CAPTURE_GET_STATE` | Return session + counters |
-| `CAPTURE_START` | Bind to one validated tab, then reload it |
-| `CAPTURE_STOP` | Stop appending entries |
-| `CAPTURE_CLEAR` | Clear entries |
-| `CAPTURE_REVOKE_HOSTS` | Stop, clear, remove optional origins |
+| `CHECK_ROUTE` | Single-IP native lookup (Milestone 1, unchanged) |
+| `CAPTURE_*` | Start/stop/clear/revoke/get state (Milestone 2) |
+| `CAPTURE_ANALYZE_ROUTES` | One `checkRoutes` batch + diagnosis (Milestone 3) |
 
-`webRequest` listeners (`onResponseStarted`, `onBeforeRedirect`, `onErrorOccurred`) are registered **synchronously at top level**. They filter on the stored numeric tab ID. The remote IP is Chrome’s `details.ip` when present — **not** DNS. IP may be missing or IPv6.
+`webRequest` listeners never call the native host. Only one analysis may run at a time (`ALREADY_ANALYZING`).
 
-Capture sessions are stored only in `chrome.storage.session` (schemaVersion 1, max **500** entries, oldest evicted). Storage updates are serialized through a Promise queue. Data is not persisted across browser/extension restarts and is not exposed to content scripts (none are used).
-
-### Native Messaging boundary
-
-Chrome launches the native host as a child process and communicates over stdin/stdout using a binary framing protocol:
-
-1. 4-byte little-endian message length
-2. UTF-8 JSON payload
-
-See [native-messaging.md](native-messaging.md) for message schemas. Milestone 2 does **not** change framing or the Swift API.
-
-**Security boundary:** only the single stable extension origin listed in the installed manifest's `allowed_origins` may invoke the host (derived from the committed `key` in `extension/manifest.json` — no wildcards). The host validates all input before executing system commands.
-
-### Swift native host (`native-host/`)
-
-Executable `vpn-route-host` plus testable core library `VpnRouteHostCore`:
+### Native host (`native-host/`)
 
 | Module | Responsibility |
 |--------|----------------|
-| `IPv4Validator` | Reject non-IPv4 input before any system call |
-| `RouteCommandExecutor` | Run `/sbin/route` via `Process` (no shell) |
-| `RouteOutputParser` | Extract `interface:` from command output |
-| `RouteClassifier` | Map interface name to `DIRECT`, `VPN`, or `UNKNOWN` |
-| `NativeMessagingFraming` | Little-endian length-prefix encode/decode |
-| `MessageHandler` | Decode JSON, orchestrate lookup, encode response |
+| `IPv4Validator` | Reject non-IPv4 before any system call |
+| `RouteCommandExecutor` | `/sbin/route` via `Process` (no shell) |
+| `RouteOutputParser` | Extract `interface:` |
+| `RouteClassifier` | `DIRECT` / `VPN` / `UNKNOWN` |
+| `NativeMessagingFraming` | Length-prefix encode/decode |
+| `MessageHandler` | `checkRoute` + `checkRoutes` (shared `lookupRouteItem`) |
 
-All diagnostics and logs go to **stderr**. **stdout** is reserved exclusively for Native Messaging framed responses.
-
-The canonical release artifact is `native-host/dist/vpn-route-host`, produced only by SwiftPM via `./scripts/build-host.sh`.
+Batch rules: validate size before Process; sequential lookups; dedupe valid IPv4s; per-item errors; no raw route stdout/stderr in responses; max 128 input items.
 
 ### Testing
 
-Unit tests live under `native-host/Tests/` and use **Swift Testing** (`import Testing`) supplied by the Swift 6.1+ toolchain. They run only through SwiftPM:
-
-```bash
-cd native-host && swift test
-```
-
-Full Xcode is not required; Xcode Command Line Tools with Swift 6.1 or newer are sufficient. There is no XCTest dependency and no fallback test runner. A failed test makes the build fail visibly (`./scripts/build-host.sh` runs `swift test` before the release build). Minimum supported platform is macOS 13.
-
-### Route lookup
-
-The host executes:
-
-```
-/sbin/route -n get <validated-ipv4>
-```
-
-Arguments are passed as a discrete array to `Process` — never interpolated into a shell command string.
-
-Classification rules:
-
-| Interface prefix | Route type |
-|------------------|------------|
-| `utun`           | `VPN`      |
-| `en`, `bridge`, `pdp_ip` | `DIRECT` |
-| other            | `UNKNOWN`  |
+- Swift Testing via `swift test` (only path).
+- Capture/analysis: `/System/Library/Frameworks/JavaScriptCore.framework/.../jsc extension/tests/run-capture-core-tests.js`.
 
 ## Security and privacy boundaries
 
-1. **Input validation** — only validated IPv4 addresses reach `/sbin/route`.
-2. **No shell execution** — no `/bin/sh -c`, `system()`, or string-built commands.
-3. **Origin allowlist** — installed Native Messaging manifest restricts connection to the single stable project extension ID. No wildcards. Private PEM is outside the repository.
-4. **Optional host access** — HTTP/HTTPS observation uses `optional_host_permissions` only; requested after explicit user action. No permanent `host_permissions` / `<all_urls>`. No `webRequestBlocking`.
-5. **Capture scope** — one selected tab ID; metadata only (no bodies, headers, cookies, authorization). URLs may still contain path/query data — capture is for intentional diagnostics.
-6. **Session memory only** — captures live in `chrome.storage.session` and clear on browser/extension restart. Nothing is sent outside the local extension except the existing manual native route-check path.
-7. **Stable key** — do not remove or regenerate the committed extension public `key`.
-
-## Future flow (batch route checks — not implemented)
-
-Later milestones will classify captured IPs via the native host in batch. `declarativeNetRequest` alone is **not** a substitute when the goal is collecting the actual remote IP Chrome connected to. Do **not** call the native host from every webRequest listener.
-
-```mermaid
-flowchart LR
-    A[Active tab capture] --> B[Hostname / IP grouping]
-    B --> C[Batch native host route checks]
-    C --> D[Export VPN-routed IPs]
-```
-
-Each milestone remains independently testable before the next layer is added.
+1. Validate all Native Messaging input before `/sbin/route`.
+2. No shell execution; discrete `Process` argument arrays only.
+3. Single stable extension origin in `allowed_origins`.
+4. Optional HTTP/HTTPS hosts only; no permanent `<all_urls>`; no `webRequestBlocking`.
+5. Metadata only — no bodies, cookies, authorization, or full headers.
+6. Session memory only (`chrome.storage.session`).
+7. Never recommend DIRECT / UNKNOWN / no-IP / IPv6 as exclusion candidates.
+8. Do not equate a current route snapshot with packet capture.
+9. Preserve the committed extension public `key`.

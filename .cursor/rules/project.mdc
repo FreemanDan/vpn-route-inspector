@@ -55,8 +55,22 @@ alwaysApply: true
 - Keep compact session diagnostics (counters only) to explain zero-entry captures.
 - Store entries even when `details.ip` is missing.
 - Never collect request/response bodies, cookies, authorization headers, or full request/response headers.
-- Do **not** route-check every event directly from a webRequest listener. Automatic VPN/DIRECT classification of captured IPs belongs to a later milestone.
 - Preserve the stable extension `key`.
+
+## Route analysis / diagnosis (Milestone 3+)
+
+- Batch unique captured IPv4s into **one** Native Messaging `checkRoutes` request (max 128). Never spawn route checks for every captured event.
+- Never invoke the native host from inside webRequest listeners. Analysis runs only after an explicit user action (`CAPTURE_ANALYZE_ROUTES`).
+- Keep single-IP `checkRoute` fully backward compatible.
+- Process batch lookups **sequentially** (no concurrent Process storms).
+- Route results are a **current routing-table snapshot**, not packet capture. Display that warning near analysis UI.
+- IPv6 may be captured but is not route-analyzed yet — label it clearly.
+- Keep diagnostic rules pure and testable in `capture-core.js` (JavaScriptCore harness).
+- Never recommend DIRECT / UNKNOWN / no-IP / IPv6 values as VPN exclusion candidates.
+- Candidate exclusions come only from `ERROR_VIA_VPN` and the VPN side of `MIXED_ROUTING`.
+- Aggregate repeated identical errors (especially `ERR_NETWORK_CHANGED` without IP); do not let them dominate findings or become candidates.
+- Protect against stale analysis writes with a source fingerprint; only one analysis in flight at a time.
+- Preserve raw capture evidence below summarized findings.
 
 ## Secrets and local paths
 

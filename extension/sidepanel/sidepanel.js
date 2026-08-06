@@ -2,11 +2,11 @@
  * Side Panel UI for VPN Route Inspector.
  *
  * Milestone 1: manual IPv4 route check via the service worker / native host.
- * Milestone 2: active-tab capture. Optional host permissions are requested only
- * from an explicit click handler, then verified with permissions.contains.
+ * Milestone 2: active-tab capture. Optional host permissions from a click.
+ * Milestone 3: explicit batch route analysis and split-tunnel diagnosis UI.
  *
- * This UI never writes the capture session document. All mutations go through
- * the service worker. Captured fields are rendered with createElement/textContent.
+ * Captured and native values are rendered with createElement/textContent only
+ * in the analysis and capture lists (no unescaped innerHTML).
  */
 
 const OPTIONAL_HOST_ORIGINS = ['http://*/*', 'https://*/*'];
@@ -23,6 +23,9 @@ let lastCaptureFingerprint = '';
 
 /** Wall-clock when the local UI observed Active after Start (for zero-event warning). */
 let captureActivatedAt = null;
+
+/** Last known candidate IPv4 list for the copy button. */
+let lastCandidateIps = [];
 
 const ipInput = document.getElementById('ip-input');
 const checkBtn = document.getElementById('check-btn');
@@ -45,6 +48,17 @@ const captureMessageEl = document.getElementById('capture-message');
 const captureResultsEl = document.getElementById('capture-results');
 const captureDiagnosticsBody = document.getElementById('capture-diagnostics-body');
 
+const analyzeRoutesBtn = document.getElementById('analyze-routes-btn');
+const copyCandidatesBtn = document.getElementById('copy-candidates-btn');
+const analyzeProgressEl = document.getElementById('analyze-progress');
+const copyFeedbackEl = document.getElementById('copy-feedback');
+const routeAnalysisEl = document.getElementById('route-analysis');
+const analysisStateLineEl = document.getElementById('analysis-state-line');
+const analysisSummaryEl = document.getElementById('analysis-summary');
+const analysisNetworkChangeNoteEl = document.getElementById('analysis-network-change-note');
+const problematicRoutesEl = document.getElementById('problematic-routes');
+const analysisGroupsEl = document.getElementById('analysis-groups');
+
 const ROUTE_TYPE_BADGE_CLASS = {
   DIRECT: 'direct',
   VPN: 'vpn',
@@ -56,6 +70,12 @@ function routeTypeBadgeClass(routeType) {
   return ROUTE_TYPE_BADGE_CLASS[normalized] || ROUTE_TYPE_BADGE_CLASS.UNKNOWN;
 }
 
+/**
+ * Escapes text for the small manual-checker result block only.
+ * Analysis / capture lists use textContent instead.
+ * @param {unknown} value
+ * @returns {string}
+ */
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -198,6 +218,7 @@ function entryRowClass(entry) {
 
 function captureFingerprint(session, summary) {
   const diag = session.diagnostics || {};
+  const analysis = session.routeAnalysis || {};
   return [
     session.active ? '1' : '0',
     String(session.tabId ?? ''),
@@ -206,7 +227,43 @@ function captureFingerprint(session, summary) {
     String(diag.entriesStored ?? 0),
     String(diag.storageWriteFailures ?? 0),
     String(session.entries.length ? session.entries[session.entries.length - 1].id : ''),
+    String(analysis.state || ''),
+    String(analysis.completedAt || ''),
+    String((analysis.candidateExclusionIps || []).length),
   ].join('|');
+}
+
+/**
+ * Counts unique IPv4s in session entries for button enablement.
+ * @param {object} session
+ * @returns {number}
+ */
+function countUniqueIPv4(session) {
+  const seen = Object.create(null);
+  let count = 0;
+  const entries = Array.isArray(session.entries) ? session.entries : [];
+  for (const entry of entries) {
+    const ip = entry && typeof entry.ip === 'string' ? entry.ip : null;
+    if (!ip || seen[ip]) {
+      continue;
+    }
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) {
+      const parts = ip.split('.');
+      let ok = true;
+      for (const part of parts) {
+        const n = Number(part);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        seen[ip] = true;
+        count += 1;
+      }
+    }
+  }
+  return count;
 }
 
 /**
@@ -246,6 +303,253 @@ function renderDiagnostics(session) {
 }
 
 /**
+ * Appends a labeled summary cell using safe DOM methods.
+ * @param {HTMLElement} parent
+ * @param {string} label
+ * @param {string} value
+ */
+function appendSummaryItem(parent, label, value) {
+  const lab = document.createElement('span');
+  lab.className = 'sum-label';
+  lab.textContent = label;
+  const val = document.createElement('span');
+  val.className = 'sum-value';
+  val.textContent = value;
+  parent.appendChild(lab);
+  parent.appendChild(val);
+}
+
+/**
+ * Formats compact HTTP/network evidence for a finding card.
+ * @param {object} finding
+ * @returns {string}
+ */
+function formatFindingEvidence(finding) {
+  const evidence = finding.evidence || {};
+  const parts = [];
+  const statuses = Array.isArray(evidence.statusCodes) ? evidence.statusCodes : [];
+  const httpErrors = Array.isArray(evidence.httpErrorStatuses)
+    ? evidence.httpErrorStatuses
+    : [];
+  if (httpErrors.length) {
+    parts.push(`HTTP ${httpErrors[0]}`);
+  } else if (statuses.length) {
+    parts.push(`HTTP ${statuses.join(',')}`);
+  }
+  const errors = evidence.networkErrors || {};
+  const errKeys = Object.keys(errors);
+  if (errKeys.length) {
+    parts.push(errKeys[0]);
+  }
+  if (finding.routeType && finding.interface) {
+    parts.push(`${finding.routeType} · ${finding.interface}`);
+  } else if (finding.routeType) {
+    parts.push(String(finding.routeType));
+  }
+  if (evidence.count && evidence.count > 1) {
+    parts.push(`×${evidence.count}`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * Renders Milestone 3 analysis summary, findings, and hostname/IP groups.
+ * @param {object} session
+ */
+function renderRouteAnalysis(session) {
+  const analysis = session.routeAnalysis || {};
+  const state = analysis.state || 'idle';
+  const uniqueIpv4 = countUniqueIPv4(session);
+  const entries = Array.isArray(session.entries) ? session.entries : [];
+  const analyzing = state === 'running';
+
+  analyzeRoutesBtn.disabled = analyzing || entries.length === 0 || uniqueIpv4 === 0;
+  analyzeRoutesBtn.textContent = (state === 'complete' || state === 'stale' || state === 'error')
+    ? 'Re-analyze routes'
+    : 'Analyze captured routes';
+
+  if (analyzing) {
+    analyzeProgressEl.textContent = `Checking routes for ${analysis.uniqueIPv4Count || uniqueIpv4} unique IPv4 addresses…`;
+    analyzeProgressEl.classList.remove('hidden');
+  } else {
+    analyzeProgressEl.textContent = '';
+    analyzeProgressEl.classList.add('hidden');
+  }
+
+  lastCandidateIps = Array.isArray(analysis.candidateExclusionIps)
+    ? analysis.candidateExclusionIps.slice()
+    : [];
+  copyCandidatesBtn.disabled = lastCandidateIps.length === 0 || analyzing;
+
+  if (state === 'idle' && !analyzing) {
+    routeAnalysisEl.classList.add('hidden');
+    return;
+  }
+
+  routeAnalysisEl.classList.remove('hidden');
+
+  const stateLabels = {
+    running: 'Analysis in progress…',
+    complete: 'Analysis complete',
+    stale: 'Analysis is stale — capture data changed. Re-analyze for a fresh snapshot.',
+    error: `Analysis error: ${(analysis.error && analysis.error.message) || 'unknown'}`,
+  };
+  analysisStateLineEl.textContent = stateLabels[state] || '';
+
+  analysisSummaryEl.replaceChildren();
+  const summary = analysis.summary || {};
+  appendSummaryItem(analysisSummaryEl, 'Unique IPv4', String(analysis.uniqueIPv4Count ?? summary.uniqueIPv4 ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'VPN', String(summary.vpn ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'DIRECT', String(summary.direct ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'UNKNOWN', String(summary.unknown ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'Strong candidates', String(summary.strongCandidates ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'Mixed-routing hosts', String(summary.mixedRoutingHosts ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'Direct-route errors', String(summary.directRouteErrors ?? 0));
+  appendSummaryItem(analysisSummaryEl, 'Unclassified errors', String(summary.unclassifiedErrors ?? 0));
+
+  if (typeof analysis.networkChangeErrorCount === 'number' && analysis.networkChangeErrorCount > 0) {
+    analysisNetworkChangeNoteEl.textContent = `Network-change errors observed: ${analysis.networkChangeErrorCount}. Network-change errors were observed; repeat after the network/VPN state has stabilized for a cleaner result.`;
+    analysisNetworkChangeNoteEl.classList.remove('hidden');
+  } else {
+    analysisNetworkChangeNoteEl.textContent = '';
+    analysisNetworkChangeNoteEl.classList.add('hidden');
+  }
+
+  problematicRoutesEl.replaceChildren();
+  const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+  const primary = findings.filter((f) => (
+    f.category === 'ERROR_VIA_VPN'
+    || f.category === 'MIXED_ROUTING'
+    || f.category === 'ERROR_VIA_DIRECT'
+    || f.category === 'UNCLASSIFIED_ERROR'
+  ));
+
+  if (primary.length === 0 && (state === 'complete' || state === 'stale')) {
+    const empty = document.createElement('p');
+    empty.className = 'empty-candidates';
+    empty.textContent = lastCandidateIps.length === 0
+      ? 'No strong split-tunneling exclusion candidates were found in this capture.'
+      : 'No problematic-route findings to highlight.';
+    problematicRoutesEl.appendChild(empty);
+  }
+
+  for (const finding of primary) {
+    const card = document.createElement('article');
+    const severity = finding.severity || 'info';
+    card.className = `finding-card severity-${severity}`;
+
+    const sev = document.createElement('span');
+    sev.className = 'finding-severity';
+    sev.textContent = `${String(severity).toUpperCase()} · ${finding.title || finding.category || 'FINDING'}`;
+    card.appendChild(sev);
+
+    const host = document.createElement('div');
+    host.className = 'finding-host';
+    host.textContent = finding.hostname || '(unknown)';
+    card.appendChild(host);
+
+    if (finding.ip) {
+      const ip = document.createElement('div');
+      ip.className = 'finding-ip';
+      ip.textContent = finding.ip;
+      card.appendChild(ip);
+    }
+
+    const meta = document.createElement('p');
+    meta.className = 'finding-meta';
+    meta.textContent = formatFindingEvidence(finding);
+    card.appendChild(meta);
+
+    if (finding.message) {
+      const msg = document.createElement('p');
+      msg.className = 'finding-message';
+      msg.textContent = finding.message;
+      card.appendChild(msg);
+    }
+
+    if (finding.guidance) {
+      const guide = document.createElement('p');
+      guide.className = 'finding-guidance';
+      guide.textContent = finding.guidance;
+      card.appendChild(guide);
+    }
+
+    if (finding.category === 'MIXED_ROUTING') {
+      const vpnIps = Array.isArray(finding.vpnIps) ? finding.vpnIps : [];
+      const directIps = Array.isArray(finding.directIps) ? finding.directIps : [];
+      const mix = document.createElement('p');
+      mix.className = 'finding-meta';
+      mix.textContent = `VPN: ${vpnIps.join(', ') || '—'} · DIRECT: ${directIps.join(', ') || '—'}`;
+      card.appendChild(mix);
+    }
+
+    problematicRoutesEl.appendChild(card);
+  }
+
+  analysisGroupsEl.replaceChildren();
+  const groups = Array.isArray(analysis.groups) ? analysis.groups : [];
+  if (groups.length === 0 && (state === 'complete' || state === 'stale')) {
+    const empty = document.createElement('p');
+    empty.className = 'capture-empty';
+    empty.textContent = 'No hostname/IP groups.';
+    analysisGroupsEl.appendChild(empty);
+  }
+
+  for (const group of groups) {
+    const row = document.createElement('div');
+    row.className = 'group-row';
+
+    const top = document.createElement('div');
+    top.className = 'group-top';
+
+    const left = document.createElement('div');
+    const host = document.createElement('div');
+    host.className = 'finding-host';
+    host.textContent = group.hostname || '(unknown)';
+    left.appendChild(host);
+
+    const ipLine = document.createElement('div');
+    ipLine.className = 'finding-ip';
+    if (group.ipVersion === 6) {
+      ipLine.textContent = `${group.ip || 'IPv6'} · Route analysis not supported yet`;
+    } else if (!group.ip) {
+      ipLine.textContent = 'No remote IP observed';
+    } else {
+      ipLine.textContent = group.ip;
+    }
+    left.appendChild(ipLine);
+    top.appendChild(left);
+
+    const right = document.createElement('div');
+    if (group.routeType) {
+      const badge = document.createElement('span');
+      badge.className = `badge ${routeTypeBadgeClass(group.routeType)}`;
+      badge.textContent = group.routeType;
+      right.appendChild(badge);
+    }
+    top.appendChild(right);
+    row.appendChild(top);
+
+    const meta = document.createElement('p');
+    meta.className = 'finding-meta';
+    const bits = [`${group.requestCount || 0} request(s)`];
+    if (group.interface) {
+      bits.push(group.interface);
+    }
+    if (group.routeNote) {
+      bits.push(group.routeNote);
+    }
+    if (group.hasErrorEvidence) {
+      bits.push('error evidence');
+    }
+    meta.textContent = bits.join(' · ');
+    row.appendChild(meta);
+
+    analysisGroupsEl.appendChild(row);
+  }
+}
+
+/**
  * Updates counters/meta quickly; optionally rebuilds the result list.
  * @param {object} session
  * @param {object} summary
@@ -256,6 +560,7 @@ function renderCaptureState(session, summary, options = {}) {
   const rebuildList = options.rebuildList !== false;
   if (!options.force && fingerprint === lastCaptureFingerprint && rebuildList) {
     renderDiagnostics(session);
+    renderRouteAnalysis(session);
     return;
   }
   if (rebuildList || options.force) {
@@ -285,6 +590,7 @@ function renderCaptureState(session, summary, options = {}) {
 
   captureStopBtn.disabled = !active;
   renderDiagnostics(session);
+  renderRouteAnalysis(session);
 
   const diag = session.diagnostics || {};
   if (active && (diag.eventsSeen ?? 0) === 0) {
@@ -444,7 +750,6 @@ async function refreshCaptureState(options = {}) {
 }
 
 function scheduleCaptureRefresh() {
-  // Update counters/diagnostics quickly.
   if (captureMetaTimer !== null) {
     clearTimeout(captureMetaTimer);
   }
@@ -453,7 +758,6 @@ function scheduleCaptureRefresh() {
     refreshCaptureState({ preserveMessage: true, rebuildList: false });
   }, 40);
 
-  // Debounce the heavy list rebuild.
   if (captureRenderTimer !== null) {
     clearTimeout(captureRenderTimer);
   }
@@ -521,7 +825,6 @@ async function ensureOptionalHostAccess() {
     return false;
   }
 
-  // Do not trust the request() boolean alone — verify the granted origins.
   const verified = await chrome.permissions.contains({ origins: OPTIONAL_HOST_ORIGINS });
   return verified === true;
 }
@@ -565,7 +868,6 @@ async function handleCaptureStart() {
       'Capture is Active for the target tab. Reloading that tab now — keep this Side Panel open to watch results arrive.'
     );
 
-    // Reload only after the session was persisted and verified by the worker.
     const reloadTabId = typeof response.reloadTabId === 'number'
       ? response.reloadTabId
       : tab.tabId;
@@ -604,7 +906,7 @@ async function handleCaptureStop() {
     }
     captureActivatedAt = null;
     renderCaptureState(response.session, response.summary, { force: true });
-    showCaptureMessage('Capture stopped. Existing results are kept until you clear them.');
+    showCaptureMessage('Capture stopped. Existing results and analysis are kept until you clear them.');
   } catch (err) {
     showCaptureMessage(err instanceof Error ? err.message : String(err), 'error');
   }
@@ -619,7 +921,7 @@ async function handleCaptureClear() {
       return;
     }
     renderCaptureState(response.session, response.summary, { force: true });
-    showCaptureMessage('Capture results cleared.');
+    showCaptureMessage('Capture results and route analysis cleared.');
   } catch (err) {
     showCaptureMessage(err instanceof Error ? err.message : String(err), 'error');
   }
@@ -646,6 +948,74 @@ async function handleCaptureRevoke() {
   }
 }
 
+/**
+ * Explicit user action: one batch checkRoutes + diagnosis.
+ */
+async function handleAnalyzeRoutes() {
+  hideCaptureMessage();
+  copyFeedbackEl.classList.add('hidden');
+  analyzeRoutesBtn.disabled = true;
+  analyzeProgressEl.textContent = 'Starting route analysis…';
+  analyzeProgressEl.classList.remove('hidden');
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'CAPTURE_ANALYZE_ROUTES' });
+    if (!response || !response.ok) {
+      const err = (response && response.error) || {};
+      showCaptureMessage(err.message || 'Route analysis failed.', 'error');
+      await refreshCaptureState({ force: true, preserveMessage: true });
+      return;
+    }
+    renderCaptureState(response.session, response.summary || {}, { force: true });
+    const candidates = (response.routeAnalysis && response.routeAnalysis.candidateExclusionIps) || [];
+    showCaptureMessage(
+      candidates.length
+        ? `Route analysis complete. ${candidates.length} candidate exclusion IP(s).`
+        : 'Route analysis complete. No strong exclusion candidates in this capture.'
+    );
+  } catch (err) {
+    showCaptureMessage(err instanceof Error ? err.message : String(err), 'error');
+  } finally {
+    await refreshCaptureState({ force: true, preserveMessage: true });
+  }
+}
+
+/**
+ * Copies newline-separated candidate exclusion IPv4s.
+ */
+async function handleCopyCandidates() {
+  copyFeedbackEl.classList.add('hidden');
+  if (!lastCandidateIps.length) {
+    copyFeedbackEl.textContent = 'No strong split-tunneling exclusion candidates were found in this capture.';
+    copyFeedbackEl.classList.remove('hidden');
+    return;
+  }
+
+  const text = lastCandidateIps.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    copyFeedbackEl.textContent = `Copied ${lastCandidateIps.length} IP address${lastCandidateIps.length === 1 ? '' : 'es'}`;
+    copyFeedbackEl.classList.remove('hidden');
+  } catch (_err) {
+    // Fallback for environments where clipboard API is restricted.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      copyFeedbackEl.textContent = `Copied ${lastCandidateIps.length} IP address${lastCandidateIps.length === 1 ? '' : 'es'}`;
+      copyFeedbackEl.classList.remove('hidden');
+    } catch (copyErr) {
+      showCaptureMessage(
+        copyErr instanceof Error ? copyErr.message : 'Could not copy candidate IPs.',
+        'error'
+      );
+    }
+    ta.remove();
+  }
+}
+
 function onStorageChanged(changes, areaName) {
   if (areaName !== 'session') {
     return;
@@ -653,7 +1023,6 @@ function onStorageChanged(changes, areaName) {
   if (!Object.prototype.hasOwnProperty.call(changes, CAPTURE_SESSION_KEY)) {
     return;
   }
-  // Never write storage from the Side Panel — only refresh from the worker/storage.
   scheduleCaptureRefresh();
 }
 
@@ -668,6 +1037,8 @@ captureStartBtn.addEventListener('click', handleCaptureStart);
 captureStopBtn.addEventListener('click', handleCaptureStop);
 captureClearBtn.addEventListener('click', handleCaptureClear);
 captureRevokeBtn.addEventListener('click', handleCaptureRevoke);
+analyzeRoutesBtn.addEventListener('click', handleAnalyzeRoutes);
+copyCandidatesBtn.addEventListener('click', handleCopyCandidates);
 
 chrome.storage.onChanged.addListener(onStorageChanged);
 
@@ -681,7 +1052,6 @@ window.addEventListener('unload', () => {
   }
 });
 
-// Zero-event warning poll while Active (Side Panel can stay open across reloads).
 setInterval(() => {
   if (captureActivatedAt && captureStateEl.textContent === 'Active') {
     refreshCaptureState({ preserveMessage: true, rebuildList: false });
