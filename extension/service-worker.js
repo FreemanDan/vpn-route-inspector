@@ -1,13 +1,20 @@
 /**
  * Manifest V3 service worker.
  *
- * Milestone 1: popup → CHECK_ROUTE → Native Messaging → Swift host.
+ * Milestone 1: Side Panel → CHECK_ROUTE → Native Messaging → Swift host.
  * Milestone 2: optional HTTP/HTTPS host access + webRequest observation for one
  *              explicitly selected tab; metadata only in chrome.storage.session.
  *
- * Native host framing and route-check API are unchanged. Captured IPs are NOT
- * sent to the native host in this milestone.
+ * Critical hardening: never drop webRequest events solely because the in-memory
+ * cache is still null after a service-worker restart. Always await authoritative
+ * session load from chrome.storage.session first.
  */
+
+/* global importScripts, VriCaptureCore */
+
+importScripts('capture-core.js');
+
+const Core = VriCaptureCore;
 
 /** Native Messaging host name registered in the Chrome manifest on disk. */
 const NATIVE_HOST_NAME = 'com.freemandan.vpn_route_inspector';
@@ -18,40 +25,41 @@ const NATIVE_MESSAGE_TIMEOUT_MS = 15000;
 /** chrome.storage.session key for the single active-tab capture session. */
 const CAPTURE_SESSION_KEY = 'captureSession';
 
-/** Schema version for the capture session document. */
-const CAPTURE_SCHEMA_VERSION = 1;
-
-/** Hard cap on stored capture entries (oldest dropped when exceeded). */
-const CAPTURE_MAX_ENTRIES = 500;
-
 /** URL filters for non-blocking webRequest observation (HTTP/HTTPS only). */
 const WEB_REQUEST_URL_FILTER = {
   urls: ['http://*/*', 'https://*/*'],
 };
 
 /**
- * Optional host origins requested only after an explicit popup user gesture.
- * These must match optional_host_permissions in manifest.json.
+ * Optional host origins requested only after an explicit user gesture.
+ * Must match optional_host_permissions in manifest.json exactly.
  */
 const OPTIONAL_HOST_ORIGINS = ['http://*/*', 'https://*/*'];
 
 /**
- * In-memory mirror of the active capture tab ID for fast filtering in webRequest
- * listeners. Updated whenever the session is loaded or mutated. Never trusted
- * alone for persistence — storage.session is the source of truth.
+ * In-memory cache of the capture session for speed after the first load.
+ * storage.session remains authoritative. Never treat a null cache as
+ * "no active session" without awaiting ensureSessionLoaded().
+ * @type {object|null}
  */
-let activeCaptureTabId = null;
+let cachedSession = null;
 
 /**
- * Serializes read-modify-write updates to chrome.storage.session so concurrent
- * webRequest events cannot lose entries through overlapping async cycles.
+ * Lazily initialized promise that resolves once the session has been loaded
+ * from storage at least once in this worker lifetime.
+ * @type {Promise<object>|null}
+ */
+let sessionLoadPromise = null;
+
+/**
+ * Serializes read-modify-write updates. Recoverable after failures:
+ * writeQueue = writeQueue.catch(() => undefined).then(task)
  * @type {Promise<unknown>}
  */
 let storageWriteChain = Promise.resolve();
 
 /**
- * Generates a short unique ID for correlating popup ↔ native host messages
- * and for capture entry identifiers.
+ * Generates a short unique ID.
  * @returns {string}
  */
 function createRequestId() {
@@ -62,7 +70,7 @@ function createRequestId() {
 }
 
 /**
- * Builds a structured error envelope for popup responses.
+ * Structured error envelope.
  * @param {string} code
  * @param {string} message
  * @returns {{ ok: false, error: { code: string, message: string } }}
@@ -72,7 +80,7 @@ function fail(code, message) {
 }
 
 /**
- * Builds a structured success envelope for popup responses.
+ * Structured success envelope.
  * @param {object} [extra]
  * @returns {{ ok: true } & object}
  */
@@ -81,270 +89,164 @@ function ok(extra = {}) {
 }
 
 /**
- * Returns a safe empty (inactive) capture session document.
- * @returns {object}
+ * Prefixed development log for capture state transitions (not every event).
+ * @param {string} message
+ * @param {object} [fields]
  */
-function emptySession() {
-  return {
-    schemaVersion: CAPTURE_SCHEMA_VERSION,
-    active: false,
-    tabId: null,
-    tabUrl: null,
-    tabTitle: null,
-    startedAt: null,
-    stoppedAt: null,
-    entries: [],
-  };
+function captureLog(message, fields) {
+  if (fields) {
+    console.log('[VRI capture]', message, fields);
+  } else {
+    console.log('[VRI capture]', message);
+  }
 }
 
 /**
- * Validates and normalizes a stored session. Malformed data resets to empty.
- * @param {unknown} raw
- * @returns {object}
- */
-function normalizeSession(raw) {
-  if (!raw || typeof raw !== 'object') {
-    return emptySession();
-  }
-
-  const session = /** @type {Record<string, unknown>} */ (raw);
-  if (session.schemaVersion !== CAPTURE_SCHEMA_VERSION) {
-    return emptySession();
-  }
-
-  const entries = Array.isArray(session.entries) ? session.entries.slice() : [];
-  // Drop anything that is not a plain object — defensive against corruption.
-  const safeEntries = entries.filter((entry) => entry && typeof entry === 'object');
-
-  const tabId = typeof session.tabId === 'number' && Number.isFinite(session.tabId)
-    ? session.tabId
-    : null;
-
-  return {
-    schemaVersion: CAPTURE_SCHEMA_VERSION,
-    active: session.active === true,
-    tabId,
-    tabUrl: typeof session.tabUrl === 'string' ? session.tabUrl : null,
-    tabTitle: typeof session.tabTitle === 'string' ? session.tabTitle : null,
-    startedAt: typeof session.startedAt === 'number' ? session.startedAt : null,
-    stoppedAt: typeof session.stoppedAt === 'number' ? session.stoppedAt : null,
-    entries: safeEntries.slice(-CAPTURE_MAX_ENTRIES),
-  };
-}
-
-/**
- * Loads the capture session from chrome.storage.session.
+ * Loads the capture session from chrome.storage.session and updates the cache.
  * @returns {Promise<object>}
  */
-async function loadSession() {
+async function loadSessionFromStorage() {
   try {
     const stored = await chrome.storage.session.get(CAPTURE_SESSION_KEY);
-    const session = normalizeSession(stored[CAPTURE_SESSION_KEY]);
-    activeCaptureTabId = session.active ? session.tabId : null;
+    const session = Core.normalizeSession(stored[CAPTURE_SESSION_KEY]);
+    cachedSession = session;
     return session;
   } catch (err) {
-    console.error('VPN Route Inspector: failed to load capture session', err);
-    activeCaptureTabId = null;
-    return emptySession();
+    console.error('[VRI capture] failed to load capture session', err);
+    cachedSession = Core.emptySession();
+    return cachedSession;
   }
 }
 
 /**
- * Persists a capture session and refreshes the in-memory tab filter.
+ * Ensures the session cache is populated. Safe after worker restart: the first
+ * webRequest event awaits this instead of treating a null cache as inactive.
+ * @returns {Promise<object>}
+ */
+function ensureSessionLoaded() {
+  if (!sessionLoadPromise) {
+    sessionLoadPromise = loadSessionFromStorage().catch((err) => {
+      console.error('[VRI capture] ensureSessionLoaded failed', err);
+      sessionLoadPromise = null;
+      cachedSession = Core.emptySession();
+      return cachedSession;
+    });
+  }
+  return sessionLoadPromise;
+}
+
+/**
+ * Invalidates the load promise so the next ensureSessionLoaded re-reads storage
+ * when needed. Mutations update cachedSession directly after writes.
+ */
+function invalidateSessionLoad() {
+  sessionLoadPromise = null;
+}
+
+/**
+ * Persists a capture session and refreshes the in-memory cache.
  * @param {object} session
  * @returns {Promise<object>}
  */
 async function saveSession(session) {
-  const normalized = normalizeSession(session);
+  const normalized = Core.normalizeSession(session);
   await chrome.storage.session.set({ [CAPTURE_SESSION_KEY]: normalized });
-  activeCaptureTabId = normalized.active ? normalized.tabId : null;
+  cachedSession = normalized;
+  sessionLoadPromise = Promise.resolve(normalized);
   return normalized;
 }
 
 /**
- * Queues an async mutation against the capture session so overlapping webRequest
- * handlers cannot race on read-modify-write. A single failure is logged and does
- * not permanently break the queue for later events.
+ * Queues an async mutation. Failures are logged and counted; the chain recovers.
  * @param {(session: object) => object | Promise<object>} mutator
  * @returns {Promise<object|null>}
  */
 function enqueueSessionUpdate(mutator) {
-  const run = storageWriteChain.then(async () => {
-    const current = await loadSession();
+  const task = async () => {
+    // Re-read authoritative state inside the queue to avoid stale snapshots.
+    const current = await loadSessionFromStorage();
     const next = await mutator(current);
     return saveSession(next);
-  });
+  };
 
-  // Keep the chain alive even when a write fails.
-  storageWriteChain = run.catch((err) => {
-    console.error('VPN Route Inspector: capture session update failed', err);
+  const run = storageWriteChain
+    .catch(() => undefined)
+    .then(task);
+
+  storageWriteChain = run.catch(async (err) => {
+    console.error('[VRI capture] storage write failure', err);
+    try {
+      const current = await loadSessionFromStorage();
+      const diag = current.diagnostics || Core.emptyDiagnostics();
+      diag.storageWriteFailures += 1;
+      diag.lastIgnoredReason = 'storage_write_failure';
+      await saveSession({ ...current, diagnostics: diag });
+    } catch (innerErr) {
+      console.error('[VRI capture] failed to record storageWriteFailures', innerErr);
+    }
   });
 
   return run.catch((err) => {
-    console.error('VPN Route Inspector: capture session update failed', err);
+    console.error('[VRI capture] storage write failure', err);
     return null;
   });
 }
 
 /**
- * Classifies a literal IP string as IPv4, IPv6, or unrecognized.
- * Does not perform DNS resolution.
- * @param {unknown} ip
- * @returns {4 | 6 | null}
- */
-function classifyIpVersion(ip) {
-  if (typeof ip !== 'string' || ip.length === 0) {
-    return null;
-  }
-
-  // IPv4 dotted-decimal (same spirit as the native host validator; no leading-zero policy here).
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) {
-    const parts = ip.split('.');
-    if (parts.every((part) => {
-      const n = Number(part);
-      return Number.isInteger(n) && n >= 0 && n <= 255;
-    })) {
-      return 4;
-    }
-    return null;
-  }
-
-  // IPv6: contains at least one colon and only hex / colon / optional zone / dotted tail.
-  if (ip.includes(':') && /^[0-9a-fA-F:.%]+$/.test(ip)) {
-    return 6;
-  }
-
-  return null;
-}
-
-/**
- * Parses an HTTP(S) URL and returns hostname + protocol, or null on failure.
- * @param {unknown} rawUrl
- * @returns {{ href: string, hostname: string, protocol: string } | null}
- */
-function parseHttpUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return null;
-    }
-    return {
-      href: parsed.href,
-      hostname: parsed.hostname,
-      protocol: parsed.protocol,
-    };
-  } catch (_err) {
-    return null;
-  }
-}
-
-/**
- * Returns true when a URL scheme is unsuitable as a capture target tab.
- * @param {string} url
- * @returns {boolean}
- */
-function isRejectedTabUrl(url) {
-  const lower = url.toLowerCase();
-  return (
-    lower.startsWith('chrome://')
-    || lower.startsWith('chrome-extension://')
-    || lower.startsWith('file://')
-    || lower.startsWith('view-source:')
-    || lower.startsWith('devtools://')
-    || lower.startsWith('about:')
-    || lower.startsWith('edge://')
-  );
-}
-
-/**
- * Builds a capture entry from a webRequest details object.
- * Stores metadata only — never headers, bodies, cookies, or authorization.
- * @param {'response' | 'redirect' | 'error'} eventType
- * @param {chrome.webRequest.WebResponseDetails | chrome.webRequest.WebRedirectionResponseDetails | chrome.webRequest.WebResponseErrorDetails} details
- * @returns {object | null}
- */
-function buildCaptureEntry(eventType, details) {
-  const parsed = parseHttpUrl(details.url);
-  if (!parsed) {
-    return null;
-  }
-
-  const ip = typeof details.ip === 'string' && details.ip.length > 0 ? details.ip : null;
-
-  return {
-    id: createRequestId(),
-    requestId: typeof details.requestId === 'string' ? details.requestId : String(details.requestId || ''),
-    eventType,
-    url: parsed.href,
-    hostname: parsed.hostname,
-    method: typeof details.method === 'string' ? details.method : null,
-    resourceType: typeof details.type === 'string' ? details.type : null,
-    tabId: typeof details.tabId === 'number' ? details.tabId : null,
-    frameId: typeof details.frameId === 'number' ? details.frameId : null,
-    parentFrameId: typeof details.parentFrameId === 'number' ? details.parentFrameId : null,
-    initiator: typeof details.initiator === 'string' ? details.initiator : null,
-    statusCode: typeof details.statusCode === 'number' ? details.statusCode : null,
-    ip,
-    ipVersion: classifyIpVersion(ip),
-    fromCache: details.fromCache === true,
-    error: typeof details.error === 'string' ? details.error : null,
-    timeStamp: typeof details.timeStamp === 'number' ? details.timeStamp : Date.now(),
-  };
-}
-
-/**
- * Appends an entry when capture is active for details.tabId.
- * Deduplicates by requestId + eventType.
+ * Shared capture pipeline for all webRequest listeners.
+ * Always awaits session load so SW restarts cannot drop the first events.
  * @param {'response' | 'redirect' | 'error'} eventType
  * @param {object} details
  */
 function recordWebRequestEvent(eventType, details) {
-  // Fast path: no active capture or wrong tab — avoid storage I/O.
-  if (activeCaptureTabId === null) {
-    return;
-  }
-  if (typeof details.tabId !== 'number' || details.tabId !== activeCaptureTabId) {
-    return;
-  }
+  // Fire-and-forget async work with attached error handling (MV3 listeners are sync).
+  const work = (async () => {
+    await ensureSessionLoaded();
 
-  const entry = buildCaptureEntry(eventType, details);
-  if (!entry) {
-    return;
-  }
+    // First event markers (once per worker wake when counters leave zero).
+    const before = cachedSession;
+    const wasZeroEvents = !before || before.diagnostics.eventsSeen === 0;
 
-  enqueueSessionUpdate((session) => {
-    if (!session.active || session.tabId !== entry.tabId) {
-      return session;
+    const result = await enqueueSessionUpdate((session) => {
+      const applied = Core.applyCaptureEvent(session, eventType, details, createRequestId);
+      return applied.session;
+    });
+
+    if (!result) {
+      return;
     }
 
-    const duplicate = session.entries.some(
-      (existing) => existing.requestId === entry.requestId && existing.eventType === entry.eventType
-    );
-    if (duplicate) {
-      return session;
+    if (wasZeroEvents && result.diagnostics.eventsSeen === 1) {
+      captureLog('first webRequest event received', {
+        eventType,
+        tabId: details.tabId,
+      });
     }
 
-    const entries = session.entries.concat([entry]);
-    // Evict oldest entries when the documented maximum is exceeded.
-    if (entries.length > CAPTURE_MAX_ENTRIES) {
-      entries.splice(0, entries.length - CAPTURE_MAX_ENTRIES);
+    if (result.diagnostics.targetTabEventsSeen === 1
+      && typeof details.tabId === 'number'
+      && details.tabId === result.tabId) {
+      captureLog('first target-tab event received', { eventType, tabId: details.tabId });
     }
 
-    return {
-      ...session,
-      entries,
-    };
+    if (result.diagnostics.entriesStored === 1 && result.entries.length === 1) {
+      captureLog('first entry stored', {
+        eventType,
+        hostname: result.entries[0].hostname,
+        hasIp: Boolean(result.entries[0].ip),
+      });
+    }
+  })();
+
+  work.catch((err) => {
+    console.error('[VRI capture] recordWebRequestEvent failed', err);
   });
 }
 
 /**
  * Sends a structured route-check request to the Swift native host.
- * @param {string} ip - IPv4 address to look up.
- * @returns {Promise<object>} Parsed JSON response from the native host.
+ * @param {string} ip
+ * @returns {Promise<object>}
  */
 function checkRouteViaNativeHost(ip) {
   const requestId = createRequestId();
@@ -379,28 +281,22 @@ function checkRouteViaNativeHost(ip) {
     try {
       chrome.runtime.sendNativeMessage(NATIVE_HOST_NAME, payload, (response) => {
         const runtimeError = chrome.runtime.lastError;
-
         if (settled) {
           return;
         }
-
         finish(() => {
           if (runtimeError) {
             reject(new Error(runtimeError.message || 'Native messaging failed.'));
             return;
           }
-
           if (!response || typeof response !== 'object') {
             reject(new Error('Native host returned an empty or invalid response.'));
             return;
           }
-
-          const responseId = response.requestId;
-          if (typeof responseId !== 'string' || responseId !== requestId) {
+          if (typeof response.requestId !== 'string' || response.requestId !== requestId) {
             reject(new Error('Native host response requestId does not match the outbound request.'));
             return;
           }
-
           resolve(response);
         });
       });
@@ -413,45 +309,33 @@ function checkRouteViaNativeHost(ip) {
 }
 
 /**
- * Computes summary counters for the popup without mutating the session.
- * @param {object} session
- * @returns {{ entryCount: number, hostnameCount: number, ipCount: number }}
- */
-function summarizeSession(session) {
-  const hostnames = new Set();
-  const ips = new Set();
-
-  for (const entry of session.entries) {
-    if (typeof entry.hostname === 'string' && entry.hostname) {
-      hostnames.add(entry.hostname);
-    }
-    if (typeof entry.ip === 'string' && entry.ip) {
-      ips.add(entry.ip);
-    }
-  }
-
-  return {
-    entryCount: session.entries.length,
-    hostnameCount: hostnames.size,
-    ipCount: ips.size,
-  };
-}
-
-/**
- * CAPTURE_GET_STATE — return the current session plus summary counters.
+ * CAPTURE_GET_STATE
  * @returns {Promise<object>}
  */
 async function handleCaptureGetState() {
-  const session = await loadSession();
+  const session = await ensureSessionLoaded().then(() => loadSessionFromStorage());
+  let permissionGranted = false;
+  try {
+    permissionGranted = await chrome.permissions.contains({ origins: OPTIONAL_HOST_ORIGINS });
+  } catch (_err) {
+    permissionGranted = false;
+  }
+
+  // Reflect live permission state in diagnostics without a full write race.
+  if (session.diagnostics.permissionGranted !== permissionGranted) {
+    session.diagnostics.permissionGranted = permissionGranted;
+    await saveSession(session);
+  }
+
   return ok({
     session,
-    summary: summarizeSession(session),
+    summary: Core.summarizeSession(session),
+    permissionGranted,
   });
 }
 
 /**
- * CAPTURE_START — bind capture to a validated tab and reload that tab only.
- * Optional host permission must already have been granted by the popup gesture.
+ * CAPTURE_START — persist + verify session BEFORE reload.
  * @param {object} message
  * @returns {Promise<object>}
  */
@@ -463,58 +347,46 @@ async function handleCaptureStart(message) {
   if (typeof tabId !== 'number' || !Number.isFinite(tabId) || tabId < 0) {
     return fail('INVALID_TAB', 'A valid numeric tab ID is required to start capture.');
   }
-
   if (!tabUrl) {
     return fail('INVALID_TAB_URL', 'The target tab URL is missing.');
   }
-
-  if (isRejectedTabUrl(tabUrl)) {
+  if (Core.isRejectedTabUrl(tabUrl) || !Core.parseHttpUrl(tabUrl).ok) {
     return fail(
       'UNSUPPORTED_TAB',
       'Capture only works on normal http: or https: pages. chrome://, extension, file, and similar URLs are not supported.'
     );
   }
 
-  const parsed = parseHttpUrl(tabUrl);
-  if (!parsed) {
-    return fail(
-      'UNSUPPORTED_TAB',
-      'Capture only works on normal http: or https: pages.'
-    );
-  }
-
-  // Confirm optional host access is present before observing cross-origin traffic.
-  const hasHosts = await chrome.permissions.contains({ origins: OPTIONAL_HOST_ORIGINS });
-  if (!hasHosts) {
+  const permissionGranted = await chrome.permissions.contains({ origins: OPTIONAL_HOST_ORIGINS });
+  if (!permissionGranted) {
     return fail(
       'HOST_PERMISSION_REQUIRED',
       'Optional HTTP/HTTPS host access was not granted. Capture was not started.'
     );
   }
+  captureLog('optional permissions verified', { permissionGranted: true });
 
-  // Verify the tab still exists and still matches an HTTP(S) page.
   let tab;
   try {
     tab = await chrome.tabs.get(tabId);
   } catch (_err) {
     return fail('TAB_NOT_FOUND', 'The target tab no longer exists.');
   }
-
   if (!tab || typeof tab.id !== 'number' || tab.id !== tabId) {
     return fail('TAB_NOT_FOUND', 'The target tab no longer exists.');
   }
 
   const liveUrl = typeof tab.url === 'string' ? tab.url : tabUrl;
-  if (isRejectedTabUrl(liveUrl) || !parseHttpUrl(liveUrl)) {
-    return fail(
-      'UNSUPPORTED_TAB',
-      'Capture only works on normal http: or https: pages.'
-    );
+  if (Core.isRejectedTabUrl(liveUrl) || !Core.parseHttpUrl(liveUrl).ok) {
+    return fail('UNSUPPORTED_TAB', 'Capture only works on normal http: or https: pages.');
   }
 
   const startedAt = Date.now();
-  const session = await saveSession({
-    schemaVersion: CAPTURE_SCHEMA_VERSION,
+  const diagnostics = Core.emptyDiagnostics();
+  diagnostics.permissionGranted = true;
+
+  const toStore = {
+    schemaVersion: Core.CAPTURE_SCHEMA_VERSION,
     active: true,
     tabId,
     tabUrl: liveUrl,
@@ -522,29 +394,39 @@ async function handleCaptureStart(message) {
     startedAt,
     stoppedAt: null,
     entries: [],
-  });
+    diagnostics,
+  };
 
-  // Start capture before reload so the main document response is observed.
-  try {
-    await chrome.tabs.reload(tabId);
-  } catch (err) {
-    // Capture is already active; report reload failure but keep listening.
-    console.error('VPN Route Inspector: failed to reload target tab', err);
-    return ok({
-      session,
-      summary: summarizeSession(session),
-      reloadWarning: err instanceof Error ? err.message : String(err),
+  // Persist completely, then read back and verify before acknowledging success.
+  await saveSession(toStore);
+  const verified = await loadSessionFromStorage();
+  if (verified.active !== true || verified.tabId !== tabId) {
+    captureLog('session persist verification failed', {
+      active: verified.active,
+      tabId: verified.tabId,
+      expectedTabId: tabId,
     });
+    return fail(
+      'SESSION_PERSIST_FAILED',
+      'Capture session could not be verified in storage. Capture was not started.'
+    );
   }
 
+  captureLog('capture session persisted', { tabId, startedAt });
+  captureLog('capture start acknowledged', { tabId });
+
+  // Reload is requested by the Side Panel after success so the UI can paint Active
+  // first. Keep a server-side reload fallback flag in the response.
   return ok({
-    session,
-    summary: summarizeSession(session),
+    session: verified,
+    summary: Core.summarizeSession(verified),
+    permissionGranted: true,
+    reloadTabId: tabId,
   });
 }
 
 /**
- * CAPTURE_STOP — mark the session inactive; keep existing entries.
+ * CAPTURE_STOP
  * @returns {Promise<object>}
  */
 async function handleCaptureStop() {
@@ -553,68 +435,75 @@ async function handleCaptureStop() {
     active: false,
     stoppedAt: Date.now(),
   }));
-
-  const finalSession = session || await loadSession();
+  const finalSession = session || await loadSessionFromStorage();
+  captureLog('capture stopped', { tabId: finalSession.tabId });
   return ok({
     session: finalSession,
-    summary: summarizeSession(finalSession),
+    summary: Core.summarizeSession(finalSession),
   });
 }
 
 /**
- * CAPTURE_CLEAR — clear entries; leave active flag unchanged unless stopping.
+ * CAPTURE_CLEAR — clear entries and reset diagnostics counters (keep active/tab).
  * @returns {Promise<object>}
  */
 async function handleCaptureClear() {
-  const session = await enqueueSessionUpdate((current) => ({
-    ...current,
-    entries: [],
-  }));
-
-  const finalSession = session || await loadSession();
+  const session = await enqueueSessionUpdate((current) => {
+    const diag = Core.emptyDiagnostics();
+    diag.permissionGranted = current.diagnostics
+      ? current.diagnostics.permissionGranted === true
+      : false;
+    return {
+      ...current,
+      entries: [],
+      diagnostics: diag,
+    };
+  });
+  const finalSession = session || await loadSessionFromStorage();
+  captureLog('capture results cleared', { tabId: finalSession.tabId });
   return ok({
     session: finalSession,
-    summary: summarizeSession(finalSession),
+    summary: Core.summarizeSession(finalSession),
   });
 }
 
 /**
- * CAPTURE_REVOKE_HOSTS — stop capture, clear entries, remove optional hosts.
- * The popup also calls permissions.remove; this keeps session state consistent
- * if the revoke is coordinated through the service worker.
+ * CAPTURE_REVOKE_HOSTS — stop, clear, revoke optional origins.
  * @returns {Promise<object>}
  */
 async function handleCaptureRevokeHosts() {
-  await enqueueSessionUpdate(() => emptySession());
-  const session = emptySession();
-  activeCaptureTabId = null;
+  await saveSession(Core.emptySession());
+  invalidateSessionLoad();
+  cachedSession = Core.emptySession();
 
   let removed = false;
   try {
     removed = await chrome.permissions.remove({ origins: OPTIONAL_HOST_ORIGINS });
   } catch (err) {
-    console.error('VPN Route Inspector: failed to remove optional host permissions', err);
+    console.error('[VRI capture] failed to remove optional host permissions', err);
     return fail(
       'REVOKE_FAILED',
       err instanceof Error ? err.message : 'Could not revoke optional host access.'
     );
   }
 
+  captureLog('optional host permissions revoked', { removed });
+  const session = Core.emptySession();
   return ok({
     session,
-    summary: summarizeSession(session),
+    summary: Core.summarizeSession(session),
     removed,
+    permissionGranted: false,
   });
 }
 
 /**
- * Handles CHECK_ROUTE exactly as in Milestone 1.
+ * CHECK_ROUTE — unchanged Milestone 1 behavior.
  * @param {object} message
  * @returns {Promise<object>}
  */
 async function handleCheckRoute(message) {
   const ip = typeof message.ip === 'string' ? message.ip.trim() : '';
-
   try {
     const response = await checkRouteViaNativeHost(ip);
     return ok({ response });
@@ -626,9 +515,52 @@ async function handleCheckRoute(message) {
   }
 }
 
+/**
+ * Reloads the target tab after CAPTURE_START was verified.
+ * Kept as a separate action so the Side Panel can render Active first.
+ * @param {object} message
+ * @returns {Promise<object>}
+ */
+async function handleCaptureReloadTarget(message) {
+  const tabId = message.tabId;
+  if (typeof tabId !== 'number' || !Number.isFinite(tabId)) {
+    return fail('INVALID_TAB', 'A valid numeric tab ID is required to reload.');
+  }
+
+  const session = await ensureSessionLoaded().then(() => loadSessionFromStorage());
+  if (!session.active || session.tabId !== tabId) {
+    return fail('CAPTURE_NOT_ACTIVE', 'Capture is not active for that tab.');
+  }
+
+  try {
+    captureLog('target reload requested', { tabId });
+    await chrome.tabs.reload(tabId);
+    return ok({ reloaded: true, tabId, session, summary: Core.summarizeSession(session) });
+  } catch (err) {
+    // Capture remains active even if reload fails.
+    console.error('[VRI capture] target reload failed', err);
+    return ok({
+      reloaded: false,
+      tabId,
+      session,
+      summary: Core.summarizeSession(session),
+      reloadWarning: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
-// webRequest listeners — registered synchronously at top level (MV3 requirement).
-// Non-blocking observation only. Never request bodies or headers.
+// Side Panel: open on action click (primary UI). No default_popup.
+// ---------------------------------------------------------------------------
+
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((err) => {
+    console.error('[VRI capture] sidePanel.setPanelBehavior failed', err);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// webRequest listeners — registered synchronously at top level.
 // ---------------------------------------------------------------------------
 
 chrome.webRequest.onResponseStarted.addListener(
@@ -652,12 +584,36 @@ chrome.webRequest.onErrorOccurred.addListener(
   WEB_REQUEST_URL_FILTER
 );
 
-// Restore in-memory tab filter when the service worker wakes.
-loadSession().catch((err) => {
-  console.error('VPN Route Inspector: initial session load failed', err);
+// Stop capture only when the *target* tab is closed — never on ordinary navigation.
+chrome.tabs.onRemoved.addListener((closedTabId) => {
+  const work = (async () => {
+    await ensureSessionLoaded();
+    const session = cachedSession || Core.emptySession();
+    if (session.active && session.tabId === closedTabId) {
+      await enqueueSessionUpdate((current) => {
+        if (!current.active || current.tabId !== closedTabId) {
+          return current;
+        }
+        return {
+          ...current,
+          active: false,
+          stoppedAt: Date.now(),
+        };
+      });
+      captureLog('target tab closed — capture stopped', { tabId: closedTabId });
+    }
+  })();
+  work.catch((err) => {
+    console.error('[VRI capture] tabs.onRemoved handler failed', err);
+  });
 });
 
-/** Internal message bridge: popup → service worker. */
+// Warm the session cache when the worker starts (does not gate listeners).
+ensureSessionLoaded().catch((err) => {
+  console.error('[VRI capture] initial session load failed', err);
+});
+
+/** Internal message bridge: Side Panel → service worker. */
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
     return false;
@@ -675,6 +631,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       break;
     case 'CAPTURE_START':
       task = handleCaptureStart(message);
+      break;
+    case 'CAPTURE_RELOAD_TARGET':
+      task = handleCaptureReloadTarget(message);
       break;
     case 'CAPTURE_STOP':
       task = handleCaptureStop();
@@ -698,6 +657,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ));
     });
 
-  // Keep the message channel open for the async response.
   return true;
 });

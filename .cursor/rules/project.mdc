@@ -44,11 +44,16 @@ alwaysApply: true
 
 ## Capture / webRequest (Milestone 2+)
 
+- Primary UI is the Chrome **Side Panel** (`sidePanel` permission + `side_panel.default_path`). Do not rely on `default_popup` for capture.
 - `webRequest` observation is **non-blocking**. Never add `webRequestBlocking`.
-- Broad HTTP/HTTPS host access must remain **optional** (`optional_host_permissions`) and requested only after an explicit user gesture.
+- Broad HTTP/HTTPS host access must remain **optional** (`optional_host_permissions`) and requested only after an explicit user gesture, then verified with `permissions.contains`.
 - Do **not** add permanent `host_permissions` with `<all_urls>`.
 - Capture only the explicitly selected numeric tab ID. Ignore other tabs.
 - Store captures **only** in `chrome.storage.session` (not `local` / `sync`). Bound entries to a documented maximum (currently 500).
+- After MV3 service-worker restart, always reload the active session from `storage.session` before filtering events — never treat a null in-memory cache as “no session”.
+- Persist and verify the capture session before reloading the target tab.
+- Keep compact session diagnostics (counters only) to explain zero-entry captures.
+- Store entries even when `details.ip` is missing.
 - Never collect request/response bodies, cookies, authorization headers, or full request/response headers.
 - Do **not** route-check every event directly from a webRequest listener. Automatic VPN/DIRECT classification of captured IPs belongs to a later milestone.
 - Preserve the stable extension `key`.

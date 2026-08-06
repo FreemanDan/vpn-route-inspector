@@ -3,7 +3,7 @@
 VPN Route Inspector is a local diagnostic stack composed of a Chrome extension and a macOS native host.
 
 - **Milestone 1 (complete):** manual IPv4 route lookup via Native Messaging.
-- **Milestone 2 (current):** user-controlled response capture for one HTTP/HTTPS tab via non-blocking `webRequest`. Captured IPs are **not** auto route-checked yet.
+- **Milestone 2 (current):** user-controlled response capture for one HTTP/HTTPS tab via non-blocking `webRequest`, with the Chrome **Side Panel** as the primary UI. Captured IPs are **not** auto route-checked yet. Entries are stored even when Chrome omits `details.ip`. The worker recovers session state from `storage.session` after restarts so reload traffic is not dropped.
 
 ## High-level flow (Milestone 1 — manual route check)
 
@@ -31,35 +31,36 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant User
-    participant Popup as Extension Popup
+    participant Panel as Side Panel
     participant SW as Service Worker
     participant WR as chrome.webRequest
     participant Store as storage.session
 
-    User->>Popup: Start capture and reload
-    Popup->>Popup: permissions.request(http/https)
-    Popup->>SW: CAPTURE_START(tabId, url)
-    SW->>Store: active session for tabId
+    User->>Panel: Start capture and reload
+    Panel->>Panel: permissions.request + contains
+    Panel->>SW: CAPTURE_START(tabId, url)
+    SW->>Store: persist + verify session
+    Panel->>SW: CAPTURE_RELOAD_TARGET
     SW->>SW: tabs.reload(tabId)
+    Note over SW: On worker restart, await storage.session before filtering
     WR-->>SW: onResponseStarted / redirect / error
-    SW->>Store: append entry (max 500)
-    User->>Popup: reopen popup
-    Popup->>SW: CAPTURE_GET_STATE
-    SW->>Popup: session + summary
+    SW->>Store: append entry + diagnostics (max 500)
+    Store-->>Panel: storage.onChanged
+    Panel->>Panel: render entries live
 ```
 
 ## Components
 
-### Extension popup (`extension/popup/`)
+### Extension Side Panel (`extension/sidepanel/`)
 
-Plain HTML/CSS/JavaScript UI with two sections:
+Primary UI (opens on action click via `chrome.sidePanel.setPanelBehavior`). Two sections:
 
 1. **Manual route check** — IPv4 input → service worker → native host (Milestone 1).
-2. **Active tab capture** — start/stop/clear/revoke; renders session metadata and a scrollable result list (Milestone 2).
+2. **Active tab capture** — start/stop/clear/revoke; live session metadata, diagnostics, and a scrollable result list (Milestone 2).
 
-The popup never calls Native Messaging directly. Capture rows are built with `createElement` / `textContent` (no unrestricted `innerHTML` of captured strings).
+The Side Panel never calls Native Messaging directly and never writes the capture session document. Capture rows use `createElement` / `textContent`.
 
-Optional HTTP/HTTPS host access is requested **only** from the **Start capture and reload** click handler so the prompt stays tied to a user gesture. Opening the popup does not request permissions. `activeTab` alone does **not** expose all cross-origin subresources; optional host access is required for CDN/API observation.
+Optional HTTP/HTTPS host access is requested **only** from **Start capture and reload**, then verified with `permissions.contains`. Opening the panel does not request permissions. Pure capture logic lives in `extension/capture-core.js` (shared with the service worker and `jsc` tests).
 
 ### Manifest V3 service worker (`extension/service-worker.js`)
 

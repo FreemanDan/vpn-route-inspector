@@ -18,20 +18,20 @@ VPN Route Inspector helps you see **which macOS interface actually routes a give
 
 **Milestone 1 (complete):** manual IPv4 route check via Native Messaging.
 
-**Milestone 2 (current):** user-controlled capture of network **responses** for one active HTTP/HTTPS tab.
+**Milestone 2 (current):** user-controlled capture of network **responses** for one active HTTP/HTTPS tab. Primary UI is the Chrome **Side Panel** (opens from the extension action).
 
 ```
-Chrome popup → service worker → chrome.webRequest (one tab)
-                              ↘ chrome.storage.session (metadata only)
+Side Panel → service worker → chrome.webRequest (one tab)
+                            ↘ chrome.storage.session (metadata + diagnostics)
 
-Chrome popup → service worker → Native Messaging → Swift host → /sbin/route
+Side Panel → service worker → Native Messaging → Swift host → /sbin/route
 ```
 
-Remote IPs come from Chrome `webRequest` response metadata (`details.ip`), **not** from DNS. The IP may be missing or IPv6. Cross-origin subresources require optional HTTP/HTTPS host access, requested only after you click **Start capture and reload**. `activeTab` alone is not enough for all CDN/API traffic.
+Remote IPs come from Chrome `webRequest` response metadata (`details.ip`), **not** from DNS. The IP may be missing or IPv6 — **entries are still stored** when IP is absent (cache/QUIC). Cross-origin subresources require optional HTTP/HTTPS host access, requested only after you click **Start capture and reload**, then verified with `permissions.contains`. `activeTab` alone is not enough for all CDN/API traffic.
 
-Captured metadata stays in `chrome.storage.session` (max 500 entries) and is cleared when the browser or extension restarts. Bodies, headers, cookies, and authorization values are **not** captured. URLs may still contain path/query data — use capture only for intentional diagnostics.
+The service worker recovers the active session from `chrome.storage.session` after MV3 worker restarts so reload traffic is not dropped. Storage updates are serialized through a recoverable Promise queue. Captured metadata stays in session memory (max 500 entries) with compact **Capture diagnostics** counters to distinguish “no events”, wrong-tab filtering, and storage failures.
 
-Automatic VPN/DIRECT classification of captured IPs is **not** in this milestone (comes later). The stable extension `key` / ID must remain unchanged.
+Bodies, headers, cookies, and authorization values are **not** captured. URLs may still contain path/query data — use capture only for intentional diagnostics. Automatic VPN/DIRECT classification of captured IPs is **not** in this pass. The stable extension `key` / ID must remain unchanged.
 
 After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) before trusting new manual route-check results.
 
@@ -96,14 +96,15 @@ Manual pasting of an ID from `chrome://extensions` is not part of this workflow,
 ## Active tab capture (Milestone 2)
 
 1. Open a normal `http:` / `https:` page (for example Wildberries, Ozon, or Yandex Market).
-2. Open the extension popup.
+2. Click the extension action to open the **Side Panel** (keep it open across reload).
 3. Click **Start capture and reload**.
 4. Accept the optional host-access prompt if Chrome shows it.
-5. After the tab reloads, reopen the popup.
-6. Inspect hostname, remote IP (when Chrome provides it), status, resource type, method, and CACHE markers.
-7. Use **Stop capture**, **Clear results**, or **Revoke network access** as needed.
+5. Confirm State = Active, then watch Entries / diagnostics update as the tab reloads.
+6. Inspect hostname, remote IP (or **No IP**), status, resource type, method, and CACHE markers.
+7. If Entries stays 0, expand **Capture diagnostics** and note `events seen`, `wrong-tab`, `storage failures`, and `last ignored reason`.
+8. Use **Stop capture**, **Clear results**, or **Revoke network access** as needed.
 
-Requests from other tabs must not appear. Manual **Check route** remains available in the same popup.
+Requests from other tabs must not appear. Manual **Check route** remains available in the same Side Panel.
 
 ## Build the native host only
 

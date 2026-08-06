@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VPN Route Inspector</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1 class="title">VPN Route Inspector</h1>
+      <p class="subtitle">Side Panel — manual route check and active-tab capture.</p>
+    </header>
+
+    <section class="panel" aria-labelledby="route-heading">
+      <h2 id="route-heading" class="panel-title">Manual route check</h2>
+      <p class="panel-note">Ask the local native host which macOS interface routes an IPv4 address.</p>
+
+      <label class="label" for="ip-input">IPv4 address</label>
+      <input
+        id="ip-input"
+        class="input"
+        type="text"
+        value="1.1.1.1"
+        placeholder="1.1.1.1"
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <button id="check-btn" class="btn" type="button">Check route</button>
+
+      <section id="status" class="status hidden" aria-live="polite"></section>
+      <section id="result" class="result hidden" aria-live="polite"></section>
+    </section>
+
+    <section class="panel" aria-labelledby="capture-heading">
+      <h2 id="capture-heading" class="panel-title">Active tab capture</h2>
+      <p class="panel-note">
+        Observes responses for one selected tab after you grant optional HTTP/HTTPS
+        host access. Remote IPs come from Chrome webRequest metadata, not DNS.
+        Entries are stored even when Chrome omits an IP (cache/QUIC).
+      </p>
+      <p class="panel-note privacy-note">
+        Captured metadata stays in Chrome session memory and is cleared when the
+        browser or extension restarts. URLs may include path or query data — use
+        capture only for intentional diagnostics.
+      </p>
+
+      <div class="btn-row">
+        <button id="capture-start-btn" class="btn" type="button">Start capture and reload</button>
+        <button id="capture-stop-btn" class="btn btn-secondary" type="button">Stop capture</button>
+      </div>
+      <div class="btn-row">
+        <button id="capture-clear-btn" class="btn btn-secondary" type="button">Clear results</button>
+        <button id="capture-revoke-btn" class="btn btn-danger" type="button">Revoke network access</button>
+      </div>
+
+      <section id="capture-status" class="capture-status" aria-live="polite">
+        <div class="meta-grid">
+          <div>
+            <span class="meta-label">State</span>
+            <span id="capture-state" class="meta-value">Stopped</span>
+          </div>
+          <div>
+            <span class="meta-label">Entries</span>
+            <span id="capture-entry-count" class="meta-value">0</span>
+          </div>
+          <div>
+            <span class="meta-label">Hostnames</span>
+            <span id="capture-hostname-count" class="meta-value">0</span>
+          </div>
+          <div>
+            <span class="meta-label">IPs</span>
+            <span id="capture-ip-count" class="meta-value">0</span>
+          </div>
+        </div>
+        <p id="capture-browser-tab" class="capture-target"></p>
+        <p id="capture-target-title" class="capture-target"></p>
+        <p id="capture-target-url" class="capture-target mono"></p>
+        <p id="capture-started-at" class="capture-target"></p>
+        <p id="capture-message" class="capture-message hidden"></p>
+      </section>
+
+      <details id="capture-diagnostics" class="diagnostics">
+        <summary>Capture diagnostics</summary>
+        <dl id="capture-diagnostics-body" class="diagnostics-body"></dl>
+      </details>
+
+      <div id="capture-results" class="capture-results" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
