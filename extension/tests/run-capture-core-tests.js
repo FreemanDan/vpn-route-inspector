@@ -20,8 +20,12 @@ if (typeof URL === 'undefined') {
     this.protocol = match[1].toLowerCase() + ':';
     var rest = match[2];
     this.hostname = '';
+    this.port = '';
     this.pathname = '';
     this.search = '';
+    this.hash = '';
+    this.username = '';
+    this.password = '';
     this.href = s;
 
     if (rest.indexOf('//') === 0) {
@@ -29,19 +33,49 @@ if (typeof URL === 'undefined') {
       var authEnd = rest.search(/[/?#]/);
       var authority = authEnd === -1 ? rest : rest.slice(0, authEnd);
       var pathPart = authEnd === -1 ? '' : rest.slice(authEnd);
+
+      // Strip userinfo (user:pass@) before host:port parsing.
+      var at = authority.lastIndexOf('@');
+      if (at !== -1) {
+        var userinfo = authority.slice(0, at);
+        authority = authority.slice(at + 1);
+        var colonUser = userinfo.indexOf(':');
+        if (colonUser === -1) {
+          this.username = userinfo;
+        } else {
+          this.username = userinfo.slice(0, colonUser);
+          this.password = userinfo.slice(colonUser + 1);
+        }
+      }
+
       if (authority.charAt(0) === '[') {
         var end = authority.indexOf(']');
         this.hostname = end === -1 ? authority : authority.slice(0, end + 1);
+        var afterBracket = end === -1 ? '' : authority.slice(end + 1);
+        if (afterBracket.charAt(0) === ':') {
+          this.port = afterBracket.slice(1);
+        }
       } else {
-        this.hostname = authority.split(':')[0];
+        var colonHost = authority.lastIndexOf(':');
+        if (colonHost !== -1 && authority.indexOf(':') === colonHost) {
+          this.hostname = authority.slice(0, colonHost);
+          this.port = authority.slice(colonHost + 1);
+        } else {
+          this.hostname = authority;
+        }
+      }
+
+      var hashIdx = pathPart.indexOf('#');
+      if (hashIdx !== -1) {
+        this.hash = pathPart.slice(hashIdx);
+        pathPart = pathPart.slice(0, hashIdx);
       }
       var q = pathPart.indexOf('?');
       if (q === -1) {
         this.pathname = pathPart || '/';
       } else {
         this.pathname = pathPart.slice(0, q) || '/';
-        var hash = pathPart.indexOf('#', q);
-        this.search = hash === -1 ? pathPart.slice(q) : pathPart.slice(q, hash);
+        this.search = pathPart.slice(q);
       }
     }
   }
@@ -469,6 +503,370 @@ var afterStore = Core.applyCaptureEvent(live, 'response', {
   timeStamp: 9999,
 }, function () { return 'id-new'; });
 assertEq(afterStore.session.routeAnalysis.state, 'stale', 'new capture entry marks analysis stale');
+
+// ---------------------------------------------------------------------------
+// Diagnostic report export
+// ---------------------------------------------------------------------------
+
+var FIXED_TS = 1700000000000;
+
+// 1. empty session report
+var emptyExport = Core.buildDiagnosticMarkdownExport(Core.emptySession(), {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(emptyExport.ok, false, 'empty session report rejected');
+assertEq(emptyExport.error.code, 'NO_CAPTURE_DATA', 'empty session NO_CAPTURE_DATA');
+
+// Helper session with capture entries
+function sessionWithEntries(entries, analysisPatch) {
+  var s = Core.emptySession();
+  s.active = false;
+  s.tabId = 42;
+  s.tabTitle = 'Shop Title';
+  s.tabUrl = 'https://user:secret@shop.example:443/path/page?token=abc#frag';
+  s.startedAt = FIXED_TS - 10000;
+  s.stoppedAt = FIXED_TS - 1000;
+  s.entries = entries;
+  s.diagnostics.eventsSeen = entries.length;
+  s.diagnostics.entriesStored = entries.length;
+  s.diagnostics.targetTabEventsSeen = entries.length;
+  if (analysisPatch) {
+    s.routeAnalysis = Object.assign(Core.emptyRouteAnalysis(), analysisPatch);
+  }
+  return s;
+}
+
+var baseEntries = [
+  makeEntry({
+    hostname: 'data-checker.wildberries.ru',
+    ip: '185.138.255.20',
+    statusCode: 403,
+    url: 'https://data-checker.wildberries.ru/api?key=SECRET#top',
+    timeStamp: FIXED_TS - 5000,
+  }),
+  makeEntry({
+    hostname: 'data-checker.wildberries.ru',
+    ip: '185.138.255.20',
+    statusCode: 204,
+    timeStamp: FIXED_TS - 4000,
+  }),
+  makeEntry({
+    hostname: 'cdn.example',
+    ip: '10.0.0.1',
+    statusCode: 200,
+    timeStamp: FIXED_TS - 3000,
+  }),
+  makeEntry({
+    hostname: 'cdn.example',
+    ip: '10.0.0.2',
+    statusCode: 200,
+    timeStamp: FIXED_TS - 2500,
+  }),
+  makeEntry({
+    hostname: 'fail.example',
+    ip: null,
+    eventType: 'error',
+    error: 'net::ERR_NETWORK_CHANGED',
+    statusCode: null,
+    timeStamp: FIXED_TS - 2000,
+  }),
+  makeEntry({
+    hostname: 'fail.example',
+    ip: null,
+    eventType: 'error',
+    error: 'net::ERR_NETWORK_CHANGED',
+    statusCode: null,
+    timeStamp: FIXED_TS - 1500,
+  }),
+];
+
+// 2. report without route analysis
+var noAnalysisExport = Core.buildDiagnosticMarkdownExport(
+  sessionWithEntries(baseEntries),
+  { extensionVersion: '0.3.1', generatedAtMs: FIXED_TS }
+);
+assertEq(noAnalysisExport.ok, true, 'report without route analysis ok');
+assert(noAnalysisExport.text.indexOf('Analysis state: not-run') !== -1, 'not-run analysis state');
+assert(noAnalysisExport.text.indexOf('Route analysis has not been run.') !== -1, 'no-analysis candidate section');
+
+// Build a complete analysis session
+var completeSession = sessionWithEntries(baseEntries);
+completeSession.routeAnalysis = Core.buildRouteAnalysis(completeSession, [
+  { ok: true, ip: '185.138.255.20', interface: 'utun4', routeType: 'VPN', error: null },
+  { ok: true, ip: '10.0.0.1', interface: 'en0', routeType: 'DIRECT', error: null },
+  { ok: true, ip: '10.0.0.2', interface: 'utun4', routeType: 'VPN', error: null },
+]);
+completeSession.routeAnalysis.startedAt = FIXED_TS - 500;
+completeSession.routeAnalysis.completedAt = FIXED_TS - 100;
+
+// 3. complete-analysis report
+var completeExport = Core.buildDiagnosticMarkdownExport(completeSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(completeExport.ok, true, 'complete-analysis report ok');
+assert(completeExport.text.indexOf('Analysis state: complete') !== -1, 'complete analysis state');
+assert(completeExport.text.indexOf('## Candidate exclusion IPs') !== -1, 'candidate section present');
+assert(completeExport.text.indexOf('185.138.255.20') !== -1, 'candidate IP section contains VPN error IP');
+
+// 30. candidate IPs match stored analysis (not recomputed differently)
+var modelComplete = Core.buildDiagnosticReportModel(completeSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(
+  modelComplete.candidates.join(','),
+  completeSession.routeAnalysis.candidateExclusionIps.join(','),
+  'candidate IPs are not recomputed differently from stored analysis'
+);
+
+// 4. stale-analysis warning
+var staleSession = Core.normalizeSession(JSON.parse(JSON.stringify(completeSession)));
+staleSession.routeAnalysis.state = 'stale';
+var staleExport = Core.buildDiagnosticMarkdownExport(staleSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(staleExport.text.indexOf('Analysis state: stale') !== -1, 'stale analysis state');
+assert(staleExport.text.indexOf('Candidate exclusions from stale analysis') !== -1, 'stale candidate label');
+assert(staleExport.text.indexOf('Re-analyze before applying exclusions') !== -1, 'stale-analysis warning');
+
+// 5. error-analysis report
+var errorSession = sessionWithEntries(baseEntries, {
+  state: 'error',
+  error: { code: 'NATIVE_HOST_ERROR', message: 'host unavailable' },
+});
+var errorExport = Core.buildDiagnosticMarkdownExport(errorSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(errorExport.text.indexOf('Analysis state: error') !== -1, 'error-analysis report');
+assert(errorExport.text.indexOf('NATIVE_HOST_ERROR') !== -1, 'error code in report');
+
+// 6/7. candidate / no-candidate sections
+var noCandSession = sessionWithEntries([
+  makeEntry({ hostname: 'ok.example', ip: '1.1.1.1', statusCode: 200 }),
+]);
+noCandSession.routeAnalysis = Core.buildRouteAnalysis(noCandSession, [
+  { ok: true, ip: '1.1.1.1', interface: 'en0', routeType: 'DIRECT', error: null },
+]);
+var noCandExport = Core.buildDiagnosticMarkdownExport(noCandSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(noCandExport.text.indexOf('No strong exclusion candidates were identified.') !== -1, 'no-candidate section');
+
+// 8–11 finding rendering
+assert(completeExport.text.indexOf('ERROR_VIA_VPN') !== -1, 'ERROR_VIA_VPN rendering');
+assert(completeExport.text.indexOf('MIXED_ROUTING') !== -1, 'MIXED_ROUTING rendering');
+assert(completeExport.text.indexOf('Strong candidate for VPN exclusion') !== -1, 'ERROR_VIA_VPN conclusion wording');
+
+var directErrSession = sessionWithEntries([
+  makeEntry({ hostname: 'direct.example', ip: '8.8.8.8', statusCode: 403 }),
+]);
+directErrSession.routeAnalysis = Core.buildRouteAnalysis(directErrSession, [
+  { ok: true, ip: '8.8.8.8', interface: 'en0', routeType: 'DIRECT', error: null },
+]);
+var directErrExport = Core.buildDiagnosticMarkdownExport(directErrSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(directErrExport.text.indexOf('ERROR_VIA_DIRECT') !== -1, 'ERROR_VIA_DIRECT rendering');
+
+var uncSession = sessionWithEntries([
+  makeEntry({
+    hostname: 'x.example',
+    ip: null,
+    eventType: 'error',
+    error: 'net::ERR_FAILED',
+    statusCode: null,
+  }),
+]);
+uncSession.routeAnalysis = Core.buildRouteAnalysis(uncSession, []);
+var uncExport = Core.buildDiagnosticMarkdownExport(uncSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(uncExport.text.indexOf('UNCLASSIFIED_ERROR') !== -1, 'UNCLASSIFIED_ERROR rendering');
+
+// 12/13 aggregated ERR_NETWORK_CHANGED; not printed individually
+assert(completeExport.text.indexOf('net::ERR_NETWORK_CHANGED — 2') !== -1, 'aggregated ERR_NETWORK_CHANGED count');
+assert(completeExport.text.indexOf('## Aggregated network errors') !== -1, 'aggregated errors section');
+// Ensure we do not dump per-event IDs from raw entries
+assert(completeExport.text.indexOf('"requestId"') === -1, 'repeated errors are not printed individually as raw JSON');
+
+// 14–18 URL sanitization
+assertEq(
+  Core.sanitizeUrlForReport('https://user:pass@example.com:8443/a/b?x=1#frag'),
+  'https://example.com:8443/a/b',
+  'query/fragment/userinfo removed; pathname preserved'
+);
+assert(Core.sanitizeUrlForReport('https://example.com/path?q=1').indexOf('?') === -1, 'query string removal');
+assert(Core.sanitizeUrlForReport('https://example.com/path#frag').indexOf('#') === -1, 'fragment removal');
+assert(Core.sanitizeUrlForReport('https://user:secret@example.com/').indexOf('user') === -1, 'username/password removal');
+assert(Core.sanitizeUrlForReport('https://example.com/keep/path').indexOf('/keep/path') !== -1, 'pathname preservation');
+assertEq(Core.sanitizeUrlForReport(':::bad'), '[unparseable-url]', 'malformed URL handling');
+assert(completeExport.text.indexOf('token=abc') === -1, 'report omits query secrets');
+assert(completeExport.text.indexOf('#frag') === -1, 'report omits fragments');
+assert(completeExport.text.indexOf('secret@') === -1, 'report omits userinfo');
+
+// 19. long-title truncation
+var longTitleSession = sessionWithEntries([makeEntry({ ip: '1.2.3.4' })]);
+longTitleSession.tabTitle = Array(200).join('T');
+var longTitleModel = Core.buildDiagnosticReportModel(longTitleSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assert(longTitleModel.capture.targetTitle.length <= 120, 'long-title truncation');
+
+// 20. hostname-group cap
+var manyHostEntries = [];
+for (var hi = 0; hi < 120; hi += 1) {
+  manyHostEntries.push(makeEntry({
+    hostname: 'host' + hi + '.example',
+    ip: '10.1.' + Math.floor(hi / 250) + '.' + (hi % 250),
+    timeStamp: FIXED_TS + hi,
+  }));
+}
+var manyHostSession = sessionWithEntries(manyHostEntries);
+manyHostSession.routeAnalysis = Core.buildRouteAnalysis(
+  manyHostSession,
+  manyHostEntries.map(function (e) {
+    return { ok: true, ip: e.ip, interface: 'en0', routeType: 'DIRECT', error: null };
+  })
+);
+var manyHostModel = Core.buildDiagnosticReportModel(manyHostSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(manyHostModel.hostnameGroups.length, Core.MAX_REPORT_HOSTNAME_GROUPS, 'hostname-group cap');
+assert(manyHostModel.truncationNotes.some(function (n) {
+  return n.indexOf('Hostname groups capped') !== -1;
+}), 'hostname-group truncation note');
+
+// 21. finding cap
+var manyFindings = [];
+for (var fi = 0; fi < 150; fi += 1) {
+  manyFindings.push({
+    category: 'VPN_WITHOUT_ERROR',
+    severity: 'info',
+    hostname: 'h' + fi + '.example',
+    ip: '1.1.1.' + (fi % 200),
+    interface: 'utun0',
+    routeType: 'VPN',
+    message: 'Routed through VPN, but no failure was observed',
+    evidence: { requestCount: 1, statusCodes: ['200'], networkErrors: {} },
+    candidate: false,
+  });
+}
+var findingCapSession = sessionWithEntries([makeEntry({ ip: '1.1.1.1' })]);
+findingCapSession.routeAnalysis = Object.assign(Core.emptyRouteAnalysis(), {
+  state: 'complete',
+  findings: manyFindings,
+  candidateExclusionIps: [],
+  summary: { uniqueIPv4: 1, vpn: 1, direct: 0, unknown: 0 },
+  uniqueIPv4Count: 1,
+});
+var findingCapModel = Core.buildDiagnosticReportModel(findingCapSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(findingCapModel.findings.length, Core.MAX_REPORT_FINDINGS, 'finding cap');
+
+// 22. deterministic output
+var detA = Core.buildDiagnosticMarkdownExport(completeSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+}).text;
+var detB = Core.buildDiagnosticMarkdownExport(completeSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+}).text;
+assertEq(detA, detB, 'deterministic output');
+
+// 23/24 no literal undefined / [object Object]
+assert(completeExport.text.indexOf('undefined') === -1, 'no literal undefined');
+assert(completeExport.text.indexOf('[object Object]') === -1, 'no literal [object Object]');
+
+// 25. no cookies/Authorization fields in markdown (allow privacy notes mentioning the words)
+assert(completeExport.text.indexOf('Authorization:') === -1, 'no Authorization header fields in markdown');
+assert(completeExport.text.indexOf('"Cookie"') === -1, 'no Cookie header fields in markdown');
+assert(completeExport.text.indexOf('Cookie:') === -1, 'no Cookie: fields in markdown');
+
+// 26/27 full JSON valid + includes routeAnalysis/diagnostics
+var jsonExport = Core.buildTechnicalExport(completeSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+assertEq(jsonExport.ok, true, 'full JSON export ok');
+var parsedJson = JSON.parse(jsonExport.text);
+assertEq(parsedJson.reportFormat, 'vpn-route-inspector-session', 'full JSON format');
+assertEq(parsedJson.reportVersion, 1, 'full JSON version');
+assert(parsedJson.captureSession && parsedJson.captureSession.routeAnalysis, 'full JSON includes routeAnalysis');
+assert(parsedJson.captureSession && parsedJson.captureSession.diagnostics, 'full JSON includes diagnostics');
+assert(Array.isArray(parsedJson.captureSession.entries), 'full JSON includes entries');
+
+// 28. full JSON size rejection
+var hugeSession = sessionWithEntries([]);
+hugeSession.entries = [];
+for (var zi = 0; zi < 500; zi += 1) {
+  hugeSession.entries.push(makeEntry({
+    id: 'huge-' + zi,
+    hostname: 'huge' + zi + '.example.com',
+    ip: '11.22.' + Math.floor(zi / 250) + '.' + (zi % 250),
+    url: 'https://huge' + zi + '.example.com/' + Array(2000).join('x') + '?q=' + zi,
+    timeStamp: FIXED_TS + zi,
+  }));
+}
+// Force size check by temporarily lowering is hard; instead build and if under limit,
+// invent oversized text path via enforce by monkeypatching is not ideal.
+// Build a synthetic oversize by calling with inflated entries enough for 4MiB.
+var inflate = [];
+for (var yi = 0; yi < 500; yi += 1) {
+  inflate.push(makeEntry({
+    id: 'pad-' + yi,
+    hostname: 'pad' + yi + '.example',
+    ip: '9.9.' + Math.floor(yi / 250) + '.' + (yi % 250),
+    url: 'https://pad' + yi + '.example/' + Array(9000).join('Z'),
+    timeStamp: FIXED_TS + yi,
+  }));
+}
+var inflateSession = sessionWithEntries(inflate);
+inflateSession.routeAnalysis = Core.emptyRouteAnalysis();
+inflateSession.routeAnalysis.state = 'complete';
+var tooLarge = Core.buildTechnicalExport(inflateSession, {
+  extensionVersion: '0.3.1',
+  generatedAtMs: FIXED_TS,
+});
+if (tooLarge.ok) {
+  // If environment still under 4MiB, fabricate rejection by checking limit helper path:
+  // ensure EXPORT_TOO_LARGE path exists by constructing oversized JSON manually through
+  // a second inflate pass with longer URLs.
+  var inflate2 = [];
+  for (var y2 = 0; y2 < 500; y2 += 1) {
+    inflate2.push(makeEntry({
+      id: 'pad2-' + y2,
+      hostname: 'pad2-' + y2 + '.example',
+      ip: '8.8.' + Math.floor(y2 / 250) + '.' + (y2 % 250),
+      url: 'https://pad2-' + y2 + '.example/' + Array(20000).join('W'),
+      timeStamp: FIXED_TS + y2,
+    }));
+  }
+  tooLarge = Core.buildTechnicalExport(sessionWithEntries(inflate2), {
+    extensionVersion: '0.3.1',
+    generatedAtMs: FIXED_TS,
+  });
+}
+assertEq(tooLarge.ok, false, 'full JSON size rejection');
+assertEq(tooLarge.error.code, 'EXPORT_TOO_LARGE', 'EXPORT_TOO_LARGE code');
+
+// 29. report character limit
+var longMd = Array(Core.MAX_DIAGNOSTIC_REPORT_CHARS + 500).join('A');
+var limited = Core.enforceReportLimits(longMd);
+assert(limited.truncated === true, 'report character limit truncated');
+assert(limited.characterCount <= Core.MAX_DIAGNOSTIC_REPORT_CHARS, 'report character limit enforced');
+assert(limited.text.indexOf('Truncation:') !== -1, 'report truncation note');
 
 print('Capture-core tests: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) {

@@ -63,10 +63,24 @@
 
       <div class="btn-row analysis-actions">
         <button id="analyze-routes-btn" class="btn btn-primary" type="button">Analyze captured routes</button>
+      </div>
+      <div class="btn-row analysis-actions">
         <button id="copy-candidates-btn" class="btn btn-secondary" type="button" disabled>Copy candidate IPs</button>
+        <button id="copy-report-btn" class="btn btn-secondary" type="button" disabled>Copy diagnostic report</button>
       </div>
       <p id="analyze-progress" class="analyze-progress hidden" aria-live="polite"></p>
       <p id="copy-feedback" class="copy-feedback hidden" aria-live="polite"></p>
+      <p id="report-copy-feedback" class="copy-feedback hidden" aria-live="polite"></p>
+
+      <details id="advanced-diagnostics" class="advanced-diagnostics">
+        <summary>Advanced diagnostics</summary>
+        <p class="panel-note json-warning">
+          Full JSON contains captured URLs, including path and query data.
+          Review it before sharing.
+        </p>
+        <button id="copy-json-btn" class="btn btn-secondary" type="button" disabled>Copy full technical JSON</button>
+        <p id="json-copy-feedback" class="copy-feedback hidden" aria-live="polite"></p>
+      </details>
 
       <section id="route-analysis" class="route-analysis hidden" aria-labelledby="analysis-heading">
         <h2 id="analysis-heading" class="panel-title">Route analysis</h2>

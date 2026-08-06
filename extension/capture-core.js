@@ -1077,12 +1077,801 @@
     return { ok: true, results: normalized };
   }
 
+  // ---------------------------------------------------------------------------
+  // Diagnostic report export (privacy-reduced Markdown + technical JSON)
+  // ---------------------------------------------------------------------------
+
+  /** Maximum Markdown report length (characters). */
+  var MAX_DIAGNOSTIC_REPORT_CHARS = 100000;
+
+  /** Maximum hostname groups rendered in the Markdown report. */
+  var MAX_REPORT_HOSTNAME_GROUPS = 100;
+
+  /** Maximum IP rows shown under one hostname in the Markdown report. */
+  var MAX_REPORT_IP_ROWS_PER_HOST = 20;
+
+  /** Maximum findings rendered in the Markdown report. */
+  var MAX_REPORT_FINDINGS = 100;
+
+  /** Maximum distinct aggregated network-error types in the Markdown report. */
+  var MAX_REPORT_NETWORK_ERROR_TYPES = 50;
+
+  /** Pathname length limit after URL sanitization. */
+  var MAX_REPORT_PATHNAME_CHARS = 200;
+
+  /** Target page title length limit in the Markdown report. */
+  var MAX_REPORT_TITLE_CHARS = 120;
+
+  /** Maximum serialized size for the full technical JSON export (bytes, UTF-8). */
+  var MAX_TECHNICAL_EXPORT_BYTES = 4 * 1024 * 1024;
+
+  /** Technical JSON envelope version. */
+  var TECHNICAL_EXPORT_VERSION = 1;
+
+  /**
+   * Returns a safe display string; never emits undefined/null/empty as raw values.
+   * @param {unknown} value
+   * @returns {string}
+   */
+  function reportDisplayValue(value) {
+    if (value === null || value === undefined) {
+      return 'Not available';
+    }
+    if (typeof value === 'string') {
+      var trimmed = value.trim();
+      return trimmed.length ? trimmed : 'Not available';
+    }
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? String(value) : 'Not available';
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    return 'Not available';
+  }
+
+  /**
+   * Truncates text to maxLen characters with an ellipsis when needed.
+   * @param {unknown} value
+   * @param {number} maxLen
+   * @returns {string}
+   */
+  function truncateReportText(value, maxLen) {
+    var text = typeof value === 'string' ? value : '';
+    if (!text) {
+      return 'Not available';
+    }
+    if (text.length <= maxLen) {
+      return text;
+    }
+    return text.slice(0, Math.max(0, maxLen - 1)) + '…';
+  }
+
+  /**
+   * Formats a millisecond timestamp as ISO-8601 UTC, or Not available.
+   * @param {unknown} ms
+   * @returns {string}
+   */
+  function formatReportTimestamp(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms)) {
+      return 'Not available';
+    }
+    try {
+      return new Date(ms).toISOString();
+    } catch (_err) {
+      return 'Not available';
+    }
+  }
+
+  /**
+   * Sanitizes a URL for the privacy-reduced Markdown report.
+   * Keeps protocol, hostname, port, pathname (length-limited).
+   * Removes username, password, query string, and fragment.
+   * @param {unknown} rawUrl
+   * @returns {string}
+   */
+  function sanitizeUrlForReport(rawUrl) {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
+      return 'Not available';
+    }
+    try {
+      var parsed = new URL(rawUrl);
+      var path = parsed.pathname || '/';
+      if (path.length > MAX_REPORT_PATHNAME_CHARS) {
+        path = path.slice(0, MAX_REPORT_PATHNAME_CHARS - 1) + '…';
+      }
+      var host = parsed.hostname || '';
+      if (!host) {
+        return '[unparseable-url]';
+      }
+      var port = parsed.port ? (':' + parsed.port) : '';
+      return parsed.protocol + '//' + host + port + path;
+    } catch (_err) {
+      return '[unparseable-url]';
+    }
+  }
+
+  /**
+   * Aggregates network-error strings from capture entries (deterministic order).
+   * Sorted by descending count, then ascending error string.
+   * @param {Array} entries
+   * @returns {{ items: Array<{ error: string, count: number }>, truncated: boolean, totalDistinct: number }}
+   */
+  function aggregateNetworkErrors(entries) {
+    var counts = {};
+    var list = Array.isArray(entries) ? entries : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var entry = list[i];
+      var err = entry && typeof entry.error === 'string' ? entry.error.trim() : '';
+      if (!err) {
+        continue;
+      }
+      counts[err] = (counts[err] || 0) + 1;
+    }
+    var keys = Object.keys(counts);
+    keys.sort(function (a, b) {
+      var diff = counts[b] - counts[a];
+      if (diff !== 0) {
+        return diff;
+      }
+      if (a < b) {
+        return -1;
+      }
+      if (a > b) {
+        return 1;
+      }
+      return 0;
+    });
+    var truncated = keys.length > MAX_REPORT_NETWORK_ERROR_TYPES;
+    var sliced = keys.slice(0, MAX_REPORT_NETWORK_ERROR_TYPES);
+    var items = [];
+    for (var k = 0; k < sliced.length; k += 1) {
+      items.push({ error: sliced[k], count: counts[sliced[k]] });
+    }
+    return {
+      items: items,
+      truncated: truncated,
+      totalDistinct: keys.length,
+    };
+  }
+
+  /**
+   * Maps routeAnalysis.state to a report-facing analysis label.
+   * @param {object} analysis
+   * @returns {string}
+   */
+  function analysisStateLabel(analysis) {
+    if (!analysis || typeof analysis !== 'object') {
+      return 'not-run';
+    }
+    var state = analysis.state;
+    if (state === 'idle' || !state) {
+      return 'not-run';
+    }
+    if (state === 'running' || state === 'complete' || state === 'stale' || state === 'error') {
+      return state;
+    }
+    return 'not-run';
+  }
+
+  /**
+   * Builds hostname → IPv4 rows for the Markdown report from stored analysis groups
+   * (preferred) or live entry aggregation.
+   * @param {object} session
+   * @param {object} analysis
+   * @returns {{ hosts: Array, truncatedHosts: boolean, truncatedIps: boolean }}
+   */
+  function buildReportHostnameGroups(session, analysis) {
+    var hostMap = {};
+    var hostOrder = [];
+    var truncatedIps = false;
+
+    function ensureHost(hostname) {
+      var key = hostname || '(unknown)';
+      if (!hostMap[key]) {
+        hostMap[key] = { hostname: key, rows: [] };
+        hostOrder.push(key);
+      }
+      return hostMap[key];
+    }
+
+    var groups = analysis && Array.isArray(analysis.groups) ? analysis.groups : null;
+    if (groups && groups.length) {
+      for (var g = 0; g < groups.length; g += 1) {
+        var group = groups[g];
+        if (!group || group.ipVersion === 6 || !group.ip) {
+          // IPv6 / no-IP rows are summarized elsewhere; keep IPv4 route groups here.
+          if (group && group.ipVersion === 6) {
+            var v6Host = ensureHost(group.hostname);
+            if (v6Host.rows.length < MAX_REPORT_IP_ROWS_PER_HOST) {
+              v6Host.rows.push({
+                ip: group.ip || 'IPv6',
+                routeType: 'Not available',
+                interface: 'Not available',
+                statuses: [],
+                requestCount: group.requestCount || 0,
+                note: 'Route analysis not supported yet',
+              });
+            } else {
+              truncatedIps = true;
+            }
+          }
+          continue;
+        }
+        var host = ensureHost(group.hostname);
+        if (host.rows.length >= MAX_REPORT_IP_ROWS_PER_HOST) {
+          truncatedIps = true;
+          continue;
+        }
+        var evidence = group.evidence || {};
+        host.rows.push({
+          ip: group.ip,
+          routeType: group.routeType || 'Not available',
+          interface: group.interface || 'Not available',
+          statuses: Array.isArray(evidence.statusCodes) ? evidence.statusCodes.slice() : [],
+          requestCount: group.requestCount || 0,
+          note: group.routeNote || null,
+        });
+      }
+    } else {
+      var aggregated = aggregateHostnameIp(session.entries);
+      for (var a = 0; a < aggregated.groups.length; a += 1) {
+        var ag = aggregated.groups[a];
+        if (ag.ipVersion !== 4 || !ag.ip) {
+          continue;
+        }
+        var h = ensureHost(ag.hostname);
+        if (h.rows.length >= MAX_REPORT_IP_ROWS_PER_HOST) {
+          truncatedIps = true;
+          continue;
+        }
+        h.rows.push({
+          ip: ag.ip,
+          routeType: 'Not available',
+          interface: 'Not available',
+          statuses: Object.keys(ag.statusCodes || {}),
+          requestCount: ag.requestCount || 0,
+          note: null,
+        });
+      }
+    }
+
+    var truncatedHosts = hostOrder.length > MAX_REPORT_HOSTNAME_GROUPS;
+    var hosts = [];
+    var limit = Math.min(hostOrder.length, MAX_REPORT_HOSTNAME_GROUPS);
+    for (var i = 0; i < limit; i += 1) {
+      hosts.push(hostMap[hostOrder[i]]);
+    }
+    return {
+      hosts: hosts,
+      truncatedHosts: truncatedHosts,
+      truncatedIps: truncatedIps,
+      totalHosts: hostOrder.length,
+    };
+  }
+
+  /**
+   * Normalizes a stored finding into a report-safe object.
+   * @param {object} finding
+   * @returns {object}
+   */
+  function normalizeFindingForReport(finding) {
+    var evidence = (finding && finding.evidence) || {};
+    var networkErrors = evidence.networkErrors || {};
+    var errKeys = Object.keys(networkErrors);
+    errKeys.sort();
+    var statuses = Array.isArray(evidence.statusCodes)
+      ? evidence.statusCodes.slice()
+      : (Array.isArray(evidence.httpErrorStatuses) ? evidence.httpErrorStatuses.map(String) : []);
+    return {
+      category: finding.category || 'UNCLASSIFIED_ERROR',
+      severity: finding.severity || 'info',
+      hostname: finding.hostname || 'Not available',
+      ip: finding.ip || null,
+      interface: finding.interface || null,
+      routeType: finding.routeType || null,
+      httpStatuses: statuses,
+      networkErrors: errKeys.map(function (key) {
+        return { error: key, count: networkErrors[key] };
+      }),
+      requestCount: typeof evidence.requestCount === 'number' ? evidence.requestCount : null,
+      conclusion: finding.message || 'Not available',
+      candidate: finding.candidate === true,
+      vpnIps: Array.isArray(finding.vpnIps) ? finding.vpnIps.slice() : null,
+      directIps: Array.isArray(finding.directIps) ? finding.directIps.slice() : null,
+      guidance: typeof finding.guidance === 'string' ? finding.guidance : null,
+    };
+  }
+
+  /**
+   * Builds a structured diagnostic report model from a capture session.
+   * Pure: no DOM / Chrome APIs. Deterministic when generatedAtMs is provided.
+   * @param {object} session
+   * @param {{ extensionVersion?: string, generatedAtMs?: number }} [options]
+   * @returns {object}
+   */
+  function buildDiagnosticReportModel(session, options) {
+    var opts = options || {};
+    var normalized = normalizeSession(session);
+    var summary = summarizeSession(normalized);
+    var analysis = normalizeRouteAnalysis(normalized.routeAnalysis);
+    var analysisLabel = analysisStateLabel(analysis);
+    var generatedAtMs = typeof opts.generatedAtMs === 'number' ? opts.generatedAtMs : Date.now();
+    var extensionVersion = typeof opts.extensionVersion === 'string' && opts.extensionVersion
+      ? opts.extensionVersion
+      : 'Not available';
+
+    var targetHost = 'Not available';
+    if (normalized.tabUrl) {
+      try {
+        targetHost = new URL(normalized.tabUrl).hostname || 'Not available';
+      } catch (_err) {
+        targetHost = 'Not available';
+      }
+    }
+
+    var networkErrors = aggregateNetworkErrors(normalized.entries);
+    var hostnameGroups = buildReportHostnameGroups(normalized, analysis);
+
+    var findings = Array.isArray(analysis.findings) ? analysis.findings.slice() : [];
+    var findingsTruncated = findings.length > MAX_REPORT_FINDINGS;
+    findings = findings.slice(0, MAX_REPORT_FINDINGS).map(normalizeFindingForReport);
+
+    var candidates = Array.isArray(analysis.candidateExclusionIps)
+      ? analysis.candidateExclusionIps.slice()
+      : [];
+
+    var truncationNotes = [];
+    if (hostnameGroups.truncatedHosts) {
+      truncationNotes.push(
+        'Hostname groups capped at ' + MAX_REPORT_HOSTNAME_GROUPS
+          + ' (of ' + hostnameGroups.totalHosts + ').'
+      );
+    }
+    if (hostnameGroups.truncatedIps) {
+      truncationNotes.push(
+        'IP rows per hostname capped at ' + MAX_REPORT_IP_ROWS_PER_HOST + '.'
+      );
+    }
+    if (findingsTruncated) {
+      truncationNotes.push('Findings capped at ' + MAX_REPORT_FINDINGS + '.');
+    }
+    if (networkErrors.truncated) {
+      truncationNotes.push(
+        'Aggregated network-error types capped at ' + MAX_REPORT_NETWORK_ERROR_TYPES
+          + ' (of ' + networkErrors.totalDistinct + ').'
+      );
+    }
+
+    var analysisSummary = analysis.summary || {};
+
+    return {
+      generatedAt: formatReportTimestamp(generatedAtMs),
+      extensionVersion: extensionVersion,
+      analysisState: analysisLabel,
+      analysisError: analysis.error,
+      capture: {
+        targetTitle: truncateReportText(normalized.tabTitle, MAX_REPORT_TITLE_CHARS),
+        targetHost: targetHost,
+        targetUrl: sanitizeUrlForReport(normalized.tabUrl),
+        tabId: normalized.tabId,
+        startedAt: formatReportTimestamp(normalized.startedAt),
+        stoppedAt: formatReportTimestamp(normalized.stoppedAt),
+        active: normalized.active === true,
+        entries: summary.entryCount,
+        hostnames: summary.hostnameCount,
+        uniqueIps: summary.ipCount,
+      },
+      routeAnalysis: {
+        uniqueIPv4Analyzed: typeof analysis.uniqueIPv4Count === 'number'
+          ? analysis.uniqueIPv4Count
+          : (analysisSummary.uniqueIPv4 || 0),
+        vpn: analysisSummary.vpn || 0,
+        direct: analysisSummary.direct || 0,
+        unknown: analysisSummary.unknown || 0,
+        skippedIPv6: analysis.skippedIPv6Count || 0,
+        skippedMissingIp: analysis.skippedMissingIpCount || 0,
+        networkChangeErrors: analysis.networkChangeErrorCount || 0,
+        strongCandidates: analysisSummary.strongCandidates || 0,
+        mixedRoutingHosts: analysisSummary.mixedRoutingHosts || 0,
+        directRouteErrors: analysisSummary.directRouteErrors || 0,
+        unclassifiedErrors: analysisSummary.unclassifiedErrors || 0,
+      },
+      candidates: candidates,
+      findings: findings,
+      hostnameGroups: hostnameGroups.hosts,
+      networkErrors: networkErrors.items,
+      diagnostics: normalizeDiagnostics(normalized.diagnostics),
+      truncationNotes: truncationNotes,
+      staleWarning: analysisLabel === 'stale',
+    };
+  }
+
+  /**
+   * Renders the diagnostic report model as privacy-reduced Markdown.
+   * @param {object} model
+   * @returns {string}
+   */
+  function renderDiagnosticReportMarkdown(model) {
+    var lines = [];
+    var m = model || {};
+
+    lines.push('# VPN Route Inspector diagnostic report');
+    lines.push('');
+    lines.push('Generated: ' + reportDisplayValue(m.generatedAt));
+    lines.push('Extension version: ' + reportDisplayValue(m.extensionVersion));
+    lines.push('Analysis state: ' + reportDisplayValue(m.analysisState));
+    if (m.staleWarning) {
+      lines.push('');
+      lines.push(
+        'Warning: Captured IPv4 data changed after the analysis. Re-analyze before applying exclusions.'
+      );
+    }
+    if (m.analysisState === 'error' && m.analysisError) {
+      lines.push(
+        'Analysis error: '
+          + reportDisplayValue(m.analysisError.code)
+          + ' — '
+          + reportDisplayValue(m.analysisError.message)
+      );
+    }
+    lines.push('');
+
+    var capture = m.capture || {};
+    lines.push('## Capture summary');
+    lines.push('');
+    lines.push('Target title: ' + reportDisplayValue(capture.targetTitle));
+    lines.push('Target host: ' + reportDisplayValue(capture.targetHost));
+    lines.push('Target URL: ' + reportDisplayValue(capture.targetUrl));
+    lines.push('Tab ID: ' + reportDisplayValue(capture.tabId));
+    lines.push('Started: ' + reportDisplayValue(capture.startedAt));
+    lines.push('Stopped: ' + reportDisplayValue(capture.stoppedAt));
+    lines.push('Entries: ' + reportDisplayValue(capture.entries));
+    lines.push('Hostnames: ' + reportDisplayValue(capture.hostnames));
+    lines.push('Unique IPs: ' + reportDisplayValue(capture.uniqueIps));
+    lines.push('');
+
+    var ra = m.routeAnalysis || {};
+    lines.push('## Route-analysis summary');
+    lines.push('');
+    if (m.analysisState === 'not-run') {
+      lines.push('Route analysis has not been run.');
+    } else if (m.analysisState === 'running') {
+      lines.push('Route analysis is currently running.');
+    } else {
+      lines.push('Unique IPv4 analyzed: ' + reportDisplayValue(ra.uniqueIPv4Analyzed));
+      lines.push('VPN: ' + reportDisplayValue(ra.vpn));
+      lines.push('DIRECT: ' + reportDisplayValue(ra.direct));
+      lines.push('UNKNOWN: ' + reportDisplayValue(ra.unknown));
+      lines.push('IPv6 skipped: ' + reportDisplayValue(ra.skippedIPv6));
+      lines.push('Missing-IP events: ' + reportDisplayValue(ra.skippedMissingIp));
+      lines.push('Network-change errors: ' + reportDisplayValue(ra.networkChangeErrors));
+    }
+    lines.push('');
+
+    lines.push('## Candidate exclusion IPs');
+    lines.push('');
+    if (m.analysisState === 'not-run' || m.analysisState === 'running') {
+      lines.push('Route analysis has not been run.');
+    } else if (m.staleWarning) {
+      lines.push('Candidate exclusions from stale analysis');
+      lines.push('');
+      if (!m.candidates || !m.candidates.length) {
+        lines.push('No strong exclusion candidates were identified.');
+      } else {
+        for (var c = 0; c < m.candidates.length; c += 1) {
+          lines.push('- ' + m.candidates[c]);
+        }
+      }
+    } else if (!m.candidates || !m.candidates.length) {
+      lines.push('No strong exclusion candidates were identified.');
+    } else {
+      for (var ci = 0; ci < m.candidates.length; ci += 1) {
+        lines.push('- ' + m.candidates[ci]);
+      }
+    }
+    lines.push('');
+
+    lines.push('## Findings');
+    lines.push('');
+    if (!m.findings || !m.findings.length) {
+      lines.push('No findings.');
+    } else {
+      for (var f = 0; f < m.findings.length; f += 1) {
+        var finding = m.findings[f];
+        lines.push(
+          '### '
+            + String(finding.severity || 'info').toUpperCase()
+            + ' — '
+            + reportDisplayValue(finding.category)
+        );
+        lines.push('Hostname: ' + reportDisplayValue(finding.hostname));
+        lines.push('IP: ' + reportDisplayValue(finding.ip));
+        lines.push('Interface: ' + reportDisplayValue(finding.interface));
+        lines.push('Route: ' + reportDisplayValue(finding.routeType));
+        lines.push(
+          'HTTP statuses: '
+            + (finding.httpStatuses && finding.httpStatuses.length
+              ? finding.httpStatuses.join(', ')
+              : 'Not available')
+        );
+        if (finding.networkErrors && finding.networkErrors.length) {
+          var errParts = [];
+          for (var ne = 0; ne < finding.networkErrors.length; ne += 1) {
+            errParts.push(
+              finding.networkErrors[ne].error + ' ×' + finding.networkErrors[ne].count
+            );
+          }
+          lines.push('Network errors: ' + errParts.join('; '));
+        } else {
+          lines.push('Network errors: Not available');
+        }
+        lines.push('Request count: ' + reportDisplayValue(finding.requestCount));
+        lines.push('Conclusion: ' + reportDisplayValue(finding.conclusion));
+        lines.push('Exclusion candidate: ' + (finding.candidate ? 'yes' : 'no'));
+        if (finding.vpnIps && finding.vpnIps.length) {
+          lines.push('VPN IPs: ' + finding.vpnIps.join(', '));
+        }
+        if (finding.directIps && finding.directIps.length) {
+          lines.push('DIRECT IPs: ' + finding.directIps.join(', '));
+        }
+        if (finding.guidance) {
+          lines.push('Guidance: ' + finding.guidance);
+        }
+        lines.push('');
+      }
+    }
+
+    lines.push('## Hostname / IPv4 route groups');
+    lines.push('');
+    if (!m.hostnameGroups || !m.hostnameGroups.length) {
+      lines.push('No hostname / IPv4 groups.');
+    } else {
+      for (var h = 0; h < m.hostnameGroups.length; h += 1) {
+        var host = m.hostnameGroups[h];
+        lines.push('### ' + reportDisplayValue(host.hostname));
+        var rows = host.rows || [];
+        if (!rows.length) {
+          lines.push('- Not available');
+        }
+        for (var r = 0; r < rows.length; r += 1) {
+          var row = rows[r];
+          var statusText = row.statuses && row.statuses.length
+            ? row.statuses.join(', ')
+            : 'Not available';
+          var routePart = reportDisplayValue(row.routeType);
+          if (row.interface && row.interface !== 'Not available') {
+            routePart += ' / ' + row.interface;
+          }
+          var line = '- '
+            + reportDisplayValue(row.ip)
+            + ' — '
+            + routePart
+            + ' — statuses: '
+            + statusText
+            + ' — requests: '
+            + reportDisplayValue(row.requestCount);
+          if (row.note) {
+            line += ' — ' + row.note;
+          }
+          lines.push(line);
+        }
+        lines.push('');
+      }
+    }
+
+    lines.push('## Aggregated network errors');
+    lines.push('');
+    if (!m.networkErrors || !m.networkErrors.length) {
+      lines.push('No network errors recorded.');
+    } else {
+      for (var e = 0; e < m.networkErrors.length; e += 1) {
+        lines.push('- ' + m.networkErrors[e].error + ' — ' + m.networkErrors[e].count);
+      }
+    }
+    lines.push('');
+
+    var diag = m.diagnostics || {};
+    lines.push('## Capture diagnostics');
+    lines.push('');
+    lines.push('- Events seen: ' + reportDisplayValue(diag.eventsSeen));
+    lines.push('- Target-tab events: ' + reportDisplayValue(diag.targetTabEventsSeen));
+    lines.push('- Events queued: ' + reportDisplayValue(diag.eventsQueued));
+    lines.push('- Entries stored: ' + reportDisplayValue(diag.entriesStored));
+    lines.push('- Entries without IP: ' + reportDisplayValue(diag.entriesWithoutIp));
+    lines.push('- Wrong-tab events: ' + reportDisplayValue(diag.ignoredWrongTab));
+    lines.push('- Storage failures: ' + reportDisplayValue(diag.storageWriteFailures));
+    lines.push('- Last ignored reason: ' + reportDisplayValue(diag.lastIgnoredReason));
+    lines.push('- Listener version: ' + reportDisplayValue(diag.listenerVersion));
+    lines.push('');
+
+    lines.push('## Notes');
+    lines.push('');
+    lines.push('- Route results are snapshots of the current macOS routing table.');
+    lines.push('- They are not packet-capture proof of a previous connection.');
+    lines.push('- Query strings and URL fragments were removed from this diagnostic report.');
+    lines.push('- IPv6 route analysis is not supported yet.');
+    lines.push('- Raw captured events are aggregated; the full event list is omitted.');
+    lines.push('- Cookies, authorization values, headers, and bodies are never included.');
+    if (m.staleWarning) {
+      lines.push(
+        '- Captured IPv4 data changed after the analysis. Re-analyze before applying exclusions.'
+      );
+    }
+    if (m.truncationNotes && m.truncationNotes.length) {
+      for (var t = 0; t < m.truncationNotes.length; t += 1) {
+        lines.push('- Truncation: ' + m.truncationNotes[t]);
+      }
+    }
+    lines.push('');
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Enforces the Markdown report character limit with an explicit truncation note.
+   * @param {string} markdown
+   * @returns {{ text: string, truncated: boolean, characterCount: number }}
+   */
+  function enforceReportLimits(markdown) {
+    var text = typeof markdown === 'string' ? markdown : '';
+    if (text.length <= MAX_DIAGNOSTIC_REPORT_CHARS) {
+      return {
+        text: text,
+        truncated: false,
+        characterCount: text.length,
+      };
+    }
+    var note = '\n\n---\nTruncation: report exceeded '
+      + MAX_DIAGNOSTIC_REPORT_CHARS
+      + ' characters and was cut for paste safety.\n';
+    var budget = MAX_DIAGNOSTIC_REPORT_CHARS - note.length;
+    if (budget < 0) {
+      budget = 0;
+    }
+    var cut = text.slice(0, budget) + note;
+    return {
+      text: cut,
+      truncated: true,
+      characterCount: cut.length,
+    };
+  }
+
+  /**
+   * Builds the full privacy-reduced Markdown export for a session.
+   * @param {object} session
+   * @param {{ extensionVersion?: string, generatedAtMs?: number }} [options]
+   * @returns {{ ok: true, text: string, format: string, characterCount: number } | { ok: false, error: object }}
+   */
+  function buildDiagnosticMarkdownExport(session, options) {
+    try {
+      var normalized = normalizeSession(session);
+      if (!normalized.entries.length) {
+        return {
+          ok: false,
+          error: {
+            code: 'NO_CAPTURE_DATA',
+            message: 'No capture entries are available to export.',
+          },
+        };
+      }
+      var model = buildDiagnosticReportModel(normalized, options);
+      var markdown = renderDiagnosticReportMarkdown(model);
+      var limited = enforceReportLimits(markdown);
+      return {
+        ok: true,
+        text: limited.text,
+        format: 'markdown',
+        characterCount: limited.characterCount,
+        truncated: limited.truncated,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPORT_FAILED',
+          message: err && err.message ? String(err.message) : 'Failed to build diagnostic report.',
+        },
+      };
+    }
+  }
+
+  /**
+   * UTF-8 byte length of a string (no TextEncoder dependency required for jsc).
+   * @param {string} text
+   * @returns {number}
+   */
+  function utf8ByteLength(text) {
+    var s = typeof text === 'string' ? text : '';
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(s).length;
+    }
+    // Fallback: approximate via encodeURIComponent (sufficient for size guards).
+    try {
+      return unescape(encodeURIComponent(s)).length;
+    } catch (_err) {
+      return s.length;
+    }
+  }
+
+  /**
+   * Builds the advanced full technical JSON export.
+   * Preserves capture session entries/analysis/diagnostics; never adds cookies/headers/bodies.
+   * @param {object} session
+   * @param {{ extensionVersion?: string, generatedAtMs?: number }} [options]
+   * @returns {{ ok: true, text: string, format: string, characterCount: number } | { ok: false, error: object }}
+   */
+  function buildTechnicalExport(session, options) {
+    try {
+      var opts = options || {};
+      var normalized = normalizeSession(session);
+      if (!normalized.entries.length) {
+        return {
+          ok: false,
+          error: {
+            code: 'NO_CAPTURE_DATA',
+            message: 'No capture entries are available to export.',
+          },
+        };
+      }
+
+      var generatedAtMs = typeof opts.generatedAtMs === 'number' ? opts.generatedAtMs : Date.now();
+      var payload = {
+        reportFormat: 'vpn-route-inspector-session',
+        reportVersion: TECHNICAL_EXPORT_VERSION,
+        generatedAt: formatReportTimestamp(generatedAtMs),
+        extensionVersion: typeof opts.extensionVersion === 'string' && opts.extensionVersion
+          ? opts.extensionVersion
+          : 'Not available',
+        captureSession: normalized,
+      };
+
+      var text = JSON.stringify(payload, null, 2);
+      var byteLength = utf8ByteLength(text);
+      if (byteLength > MAX_TECHNICAL_EXPORT_BYTES) {
+        return {
+          ok: false,
+          error: {
+            code: 'EXPORT_TOO_LARGE',
+            message: 'Full technical JSON exceeds the '
+              + MAX_TECHNICAL_EXPORT_BYTES
+              + ' byte limit ('
+              + byteLength
+              + ' bytes). Clear older capture data or reduce entry count.',
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        text: text,
+        format: 'json',
+        characterCount: text.length,
+        byteLength: byteLength,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: 'EXPORT_FAILED',
+          message: err && err.message ? String(err.message) : 'Failed to build technical JSON export.',
+        },
+      };
+    }
+  }
+
   global.VriCaptureCore = {
     CAPTURE_SCHEMA_VERSION: CAPTURE_SCHEMA_VERSION,
     CAPTURE_MAX_ENTRIES: CAPTURE_MAX_ENTRIES,
     MAX_ANALYZE_IPV4: MAX_ANALYZE_IPV4,
     ROUTE_ANALYSIS_SCHEMA_VERSION: ROUTE_ANALYSIS_SCHEMA_VERSION,
     LISTENER_VERSION: LISTENER_VERSION,
+    MAX_DIAGNOSTIC_REPORT_CHARS: MAX_DIAGNOSTIC_REPORT_CHARS,
+    MAX_REPORT_HOSTNAME_GROUPS: MAX_REPORT_HOSTNAME_GROUPS,
+    MAX_REPORT_IP_ROWS_PER_HOST: MAX_REPORT_IP_ROWS_PER_HOST,
+    MAX_REPORT_FINDINGS: MAX_REPORT_FINDINGS,
+    MAX_REPORT_NETWORK_ERROR_TYPES: MAX_REPORT_NETWORK_ERROR_TYPES,
+    MAX_TECHNICAL_EXPORT_BYTES: MAX_TECHNICAL_EXPORT_BYTES,
     emptyDiagnostics: emptyDiagnostics,
     emptyRouteAnalysis: emptyRouteAnalysis,
     emptySession: emptySession,
@@ -1107,5 +1896,13 @@
     refreshAnalysisStaleState: refreshAnalysisStaleState,
     normalizeNativeRouteItem: normalizeNativeRouteItem,
     validateNativeRouteResults: validateNativeRouteResults,
+    sanitizeUrlForReport: sanitizeUrlForReport,
+    aggregateNetworkErrors: aggregateNetworkErrors,
+    buildDiagnosticReportModel: buildDiagnosticReportModel,
+    renderDiagnosticReportMarkdown: renderDiagnosticReportMarkdown,
+    enforceReportLimits: enforceReportLimits,
+    buildDiagnosticMarkdownExport: buildDiagnosticMarkdownExport,
+    buildTechnicalExport: buildTechnicalExport,
+    reportDisplayValue: reportDisplayValue,
   };
 }(typeof globalThis !== 'undefined' ? globalThis : this));

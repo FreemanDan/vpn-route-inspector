@@ -473,6 +473,41 @@ body {
   color: #1f4d21;
 }
 
+.copy-feedback.copy-feedback-error {
+  background: #fdeeee;
+  border-color: #f0bcbc;
+  color: #7a1f1f;
+}
+
+.advanced-diagnostics {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid #d9e0ea;
+  border-radius: 6px;
+  background: #fafbfd;
+  font-size: 11px;
+}
+
+.advanced-diagnostics > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #5c6370;
+}
+
+.advanced-diagnostics .json-warning {
+  margin-top: 8px;
+  color: #7a5b00;
+  background: #fff8e8;
+  border: 1px solid #f0d48a;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.advanced-diagnostics .btn {
+  margin-top: 8px;
+  width: 100%;
+}
+
 .route-analysis {
   margin: 12px 0;
   padding: 12px;

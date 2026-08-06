@@ -727,6 +727,76 @@ async function handleCaptureAnalyzeRoutes() {
 }
 
 /**
+ * Resolves the extension version from the installed manifest.
+ * @returns {string}
+ */
+function getExtensionVersion() {
+  try {
+    const manifest = chrome.runtime.getManifest();
+    if (manifest && typeof manifest.version === 'string' && manifest.version) {
+      return manifest.version;
+    }
+  } catch (_err) {
+    // Fall through.
+  }
+  return 'Not available';
+}
+
+/**
+ * CAPTURE_EXPORT_REPORT — privacy-reduced Markdown from authoritative session.
+ * @returns {Promise<object>}
+ */
+async function handleCaptureExportReport() {
+  try {
+    const session = await loadSessionFromStorage();
+    const exported = Core.buildDiagnosticMarkdownExport(session, {
+      extensionVersion: getExtensionVersion(),
+      generatedAtMs: Date.now(),
+    });
+    if (!exported.ok) {
+      return fail(exported.error.code, exported.error.message);
+    }
+    return ok({
+      text: exported.text,
+      format: exported.format,
+      characterCount: exported.characterCount,
+    });
+  } catch (err) {
+    return fail(
+      'EXPORT_FAILED',
+      err instanceof Error ? err.message : 'Failed to export diagnostic report.'
+    );
+  }
+}
+
+/**
+ * CAPTURE_EXPORT_JSON — full technical JSON (explicit advanced action).
+ * @returns {Promise<object>}
+ */
+async function handleCaptureExportJson() {
+  try {
+    const session = await loadSessionFromStorage();
+    const exported = Core.buildTechnicalExport(session, {
+      extensionVersion: getExtensionVersion(),
+      generatedAtMs: Date.now(),
+    });
+    if (!exported.ok) {
+      return fail(exported.error.code, exported.error.message);
+    }
+    return ok({
+      text: exported.text,
+      format: exported.format,
+      characterCount: exported.characterCount,
+    });
+  } catch (err) {
+    return fail(
+      'EXPORT_FAILED',
+      err instanceof Error ? err.message : 'Failed to export technical JSON.'
+    );
+  }
+}
+
+/**
  * Reloads the target tab after CAPTURE_START was verified.
  * Kept as a separate action so the Side Panel can render Active first.
  * @param {object} message
@@ -857,6 +927,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       break;
     case 'CAPTURE_ANALYZE_ROUTES':
       task = handleCaptureAnalyzeRoutes();
+      break;
+    case 'CAPTURE_EXPORT_REPORT':
+      task = handleCaptureExportReport();
+      break;
+    case 'CAPTURE_EXPORT_JSON':
+      task = handleCaptureExportJson();
       break;
     default:
       return false;

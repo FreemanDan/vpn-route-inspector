@@ -74,8 +74,24 @@ Then load / reload the unpacked `extension/` folder at `chrome://extensions/` an
 5. Review the **Route analysis** summary (Unique IPv4 / VPN / DIRECT / UNKNOWN).
 6. Inspect **Problematic routes** (ERROR VIA VPN, MIXED ROUTING, …).
 7. Click **Copy candidate IPs** for newline-separated exclusion candidates only.
-8. Optional: change a VPN exclusion, reconnect VPN, **Re-analyze routes** and confirm the current route snapshot changed.
-9. Manual **Check route** remains under **Manual tools**.
+8. Click **Copy diagnostic report** for a privacy-reduced Markdown summary suitable for support chat.
+9. Optional advanced: **Copy full technical JSON** (contains path/query data — review before sharing).
+10. Optional: change a VPN exclusion, reconnect VPN, **Re-analyze routes** and confirm the current route snapshot changed.
+11. Manual **Check route** remains under **Manual tools**.
+
+### Diagnostic report export
+
+**Copy diagnostic report** builds Markdown from the authoritative `chrome.storage.session` capture session (service worker actions `CAPTURE_EXPORT_REPORT` / `CAPTURE_EXPORT_JSON`). The Side Panel only copies the returned string — it does not reconstruct diagnosis from a stale DOM snapshot.
+
+The Markdown report:
+
+- aggregates evidence (no raw hundreds-of-events dump);
+- removes URL query strings, fragments, and userinfo;
+- labels stale analysis clearly;
+- never includes cookies, authorization values, headers, or bodies;
+- stays under 100,000 characters with explicit truncation notes when sections are capped.
+
+**Full technical JSON** is an explicit advanced action only. It may contain captured URLs including path and query data. Nothing is uploaded automatically; exports stay on the clipboard.
 
 ### Diagnostic categories
 

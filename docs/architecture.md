@@ -100,8 +100,12 @@ Shared by the service worker and JavaScriptCore tests. Owns capture session norm
 | `CHECK_ROUTE` | Single-IP native lookup (Milestone 1, unchanged) |
 | `CAPTURE_*` | Start/stop/clear/revoke/get state (Milestone 2) |
 | `CAPTURE_ANALYZE_ROUTES` | One `checkRoutes` batch + diagnosis (Milestone 3) |
+| `CAPTURE_EXPORT_REPORT` | Privacy-reduced Markdown diagnostic report |
+| `CAPTURE_EXPORT_JSON` | Full technical JSON (explicit advanced export) |
 
 `webRequest` listeners never call the native host. Only one analysis may run at a time (`ALREADY_ANALYZING`).
+
+Diagnostic Markdown is privacy-reduced (no query/fragment/userinfo; aggregated evidence; 100k character cap). Full JSON may include path/query URL data and must never be generated automatically. Exports are clipboard-only — never uploaded.
 
 ### Native host (`native-host/`)
 

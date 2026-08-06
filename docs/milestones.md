@@ -47,6 +47,18 @@ Small, independently verifiable milestones for VPN Route Inspector.
 - Swift Testing + JavaScriptCore tests pass
 - Stable ID unchanged
 
+### Diagnostic report export (0.3.1+)
+
+**Verify:**
+- **Copy diagnostic report** produces privacy-reduced Markdown from `storage.session`
+- Query strings / fragments / userinfo removed; no raw event dump
+- Stale analysis labelled; candidates come from stored `candidateExclusionIps`
+- **Copy full technical JSON** is under Advanced diagnostics with a visible path/query warning
+- Full JSON parses; size > 4 MiB returns `EXPORT_TOO_LARGE`
+- Nothing uploaded; clipboard only
+- Manifest version ≥ `0.3.1`; stable ID unchanged
+- Pure report helpers covered by JavaScriptCore tests
+
 ## 4. Domain/IP grouping (partially covered by M3)
 
 **Goal:** Richer grouping / registrable-domain UX beyond hostname→IPv4 pairs already shown in M3.

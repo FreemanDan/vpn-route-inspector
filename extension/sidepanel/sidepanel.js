@@ -50,8 +50,12 @@ const captureDiagnosticsBody = document.getElementById('capture-diagnostics-body
 
 const analyzeRoutesBtn = document.getElementById('analyze-routes-btn');
 const copyCandidatesBtn = document.getElementById('copy-candidates-btn');
+const copyReportBtn = document.getElementById('copy-report-btn');
+const copyJsonBtn = document.getElementById('copy-json-btn');
 const analyzeProgressEl = document.getElementById('analyze-progress');
 const copyFeedbackEl = document.getElementById('copy-feedback');
+const reportCopyFeedbackEl = document.getElementById('report-copy-feedback');
+const jsonCopyFeedbackEl = document.getElementById('json-copy-feedback');
 const routeAnalysisEl = document.getElementById('route-analysis');
 const analysisStateLineEl = document.getElementById('analysis-state-line');
 const analysisSummaryEl = document.getElementById('analysis-summary');
@@ -367,6 +371,11 @@ function renderRouteAnalysis(session) {
   analyzeRoutesBtn.textContent = (state === 'complete' || state === 'stale' || state === 'error')
     ? 'Re-analyze routes'
     : 'Analyze captured routes';
+
+  // Diagnostic report / full JSON require at least one captured entry.
+  const hasEntries = entries.length > 0;
+  copyReportBtn.disabled = !hasEntries || analyzing;
+  copyJsonBtn.disabled = !hasEntries;
 
   if (analyzing) {
     analyzeProgressEl.textContent = `Checking routes for ${analysis.uniqueIPv4Count || uniqueIpv4} unique IPv4 addresses…`;
@@ -981,6 +990,40 @@ async function handleAnalyzeRoutes() {
 }
 
 /**
+ * Copies text via the Clipboard API from an explicit user gesture.
+ * @param {string} text
+ * @returns {Promise<void>}
+ */
+async function copyTextToClipboard(text) {
+  if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+    throw new Error('Clipboard API is unavailable in this context.');
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+/**
+ * Shows feedback in a dedicated report/json feedback element.
+ * @param {HTMLElement} el
+ * @param {string} message
+ * @param {'ok'|'error'} kind
+ */
+function showExportFeedback(el, message, kind) {
+  el.textContent = message;
+  el.className = kind === 'error'
+    ? 'copy-feedback copy-feedback-error'
+    : 'copy-feedback';
+}
+
+/**
+ * Hides an export feedback element.
+ * @param {HTMLElement} el
+ */
+function hideExportFeedback(el) {
+  el.textContent = '';
+  el.className = 'copy-feedback hidden';
+}
+
+/**
  * Copies newline-separated candidate exclusion IPv4s.
  */
 async function handleCopyCandidates() {
@@ -993,26 +1036,74 @@ async function handleCopyCandidates() {
 
   const text = lastCandidateIps.join('\n');
   try {
-    await navigator.clipboard.writeText(text);
+    await copyTextToClipboard(text);
     copyFeedbackEl.textContent = `Copied ${lastCandidateIps.length} IP address${lastCandidateIps.length === 1 ? '' : 'es'}`;
-    copyFeedbackEl.classList.remove('hidden');
-  } catch (_err) {
-    // Fallback for environments where clipboard API is restricted.
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-      copyFeedbackEl.textContent = `Copied ${lastCandidateIps.length} IP address${lastCandidateIps.length === 1 ? '' : 'es'}`;
-      copyFeedbackEl.classList.remove('hidden');
-    } catch (copyErr) {
-      showCaptureMessage(
-        copyErr instanceof Error ? copyErr.message : 'Could not copy candidate IPs.',
+    copyFeedbackEl.className = 'copy-feedback';
+  } catch (err) {
+    showCaptureMessage(
+      err instanceof Error ? err.message : 'Could not copy candidate IPs.',
+      'error'
+    );
+  }
+}
+
+/**
+ * Requests the privacy-reduced Markdown report from the service worker and copies it.
+ */
+async function handleCopyDiagnosticReport() {
+  hideExportFeedback(reportCopyFeedbackEl);
+  copyReportBtn.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'CAPTURE_EXPORT_REPORT' });
+    if (!response || !response.ok) {
+      const err = (response && response.error) || {};
+      showExportFeedback(
+        reportCopyFeedbackEl,
+        err.message || 'Unable to copy report',
         'error'
       );
+      return;
     }
-    ta.remove();
+    await copyTextToClipboard(response.text);
+    showExportFeedback(reportCopyFeedbackEl, 'Diagnostic report copied', 'ok');
+  } catch (err) {
+    showExportFeedback(
+      reportCopyFeedbackEl,
+      err instanceof Error ? err.message : 'Unable to copy report',
+      'error'
+    );
+  } finally {
+    await refreshCaptureState({ force: true, preserveMessage: true });
+  }
+}
+
+/**
+ * Requests the full technical JSON export and copies it (explicit advanced action).
+ */
+async function handleCopyTechnicalJson() {
+  hideExportFeedback(jsonCopyFeedbackEl);
+  copyJsonBtn.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'CAPTURE_EXPORT_JSON' });
+    if (!response || !response.ok) {
+      const err = (response && response.error) || {};
+      showExportFeedback(
+        jsonCopyFeedbackEl,
+        err.message || 'Unable to copy report',
+        'error'
+      );
+      return;
+    }
+    await copyTextToClipboard(response.text);
+    showExportFeedback(jsonCopyFeedbackEl, 'Full technical JSON copied', 'ok');
+  } catch (err) {
+    showExportFeedback(
+      jsonCopyFeedbackEl,
+      err instanceof Error ? err.message : 'Unable to copy report',
+      'error'
+    );
+  } finally {
+    await refreshCaptureState({ force: true, preserveMessage: true });
   }
 }
 
@@ -1039,6 +1130,8 @@ captureClearBtn.addEventListener('click', handleCaptureClear);
 captureRevokeBtn.addEventListener('click', handleCaptureRevoke);
 analyzeRoutesBtn.addEventListener('click', handleAnalyzeRoutes);
 copyCandidatesBtn.addEventListener('click', handleCopyCandidates);
+copyReportBtn.addEventListener('click', handleCopyDiagnosticReport);
+copyJsonBtn.addEventListener('click', handleCopyTechnicalJson);
 
 chrome.storage.onChanged.addListener(onStorageChanged);
 

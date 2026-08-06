@@ -72,6 +72,17 @@ alwaysApply: true
 - Protect against stale analysis writes with a source fingerprint; only one analysis in flight at a time.
 - Preserve raw capture evidence below summarized findings.
 
+## Diagnostic exports
+
+- Support reports must be **privacy-reduced by default** (Markdown diagnostic report).
+- Never include cookies, authorization values, headers, or bodies in any export.
+- Prefer aggregated evidence over raw event dumps in the default report.
+- Strip query strings, fragments, and userinfo from URLs in the Markdown report.
+- Raw technical JSON export must be an **explicit** advanced action with a visible path/query warning.
+- Never upload diagnostic exports automatically; clipboard only.
+- Stale analysis must never be presented as current without a clear warning.
+- Generate exports from the authoritative `chrome.storage.session` state in the service worker — not from a Side Panel DOM snapshot.
+
 ## Secrets and local paths
 
 - Do not store secrets, credentials, cookies, or browsing history in the repository or native host.
