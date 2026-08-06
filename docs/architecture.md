@@ -44,7 +44,7 @@ Chrome launches the native host as a child process and communicates over stdin/s
 
 See [native-messaging.md](native-messaging.md) for message schemas.
 
-**Security boundary:** only extension origins listed in the installed manifest's `allowed_origins` may invoke the host. The host validates all input before executing system commands.
+**Security boundary:** only the single stable extension origin listed in the installed manifest's `allowed_origins` may invoke the host (derived from the committed `key` in `extension/manifest.json` — no wildcards). The host validates all input before executing system commands.
 
 ### Swift native host (`native-host/`)
 
@@ -95,9 +95,9 @@ Classification rules:
 
 1. **Input validation** — only validated IPv4 addresses reach `/sbin/route`.
 2. **No shell execution** — no `/bin/sh -c`, `system()`, or string-built commands.
-3. **Origin allowlist** — installed manifest restricts which extension ID may connect.
+3. **Origin allowlist** — installed manifest restricts connection to the single stable project extension ID (from the committed public key). No wildcards. Private PEM is outside the repository.
 4. **Minimal Chrome permissions** — no `<all_urls>` or `webRequest` until request capture is implemented.
-5. **No secrets** — the tool does not store credentials, cookies, or browsing history.
+5. **No secrets** — the tool does not store credentials, cookies, or browsing history. Do not commit the Chrome extension private PEM.
 
 ## Future request-capture flow (not implemented)
 

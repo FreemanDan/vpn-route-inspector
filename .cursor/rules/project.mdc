@@ -25,6 +25,14 @@ alwaysApply: true
 - Do not introduce fallback build systems or silently bypass failed tests. Fix the supported build path or report the blocker.
 - The canonical distributable artifact is `native-host/dist/vpn-route-host`.
 
+## Stable extension identity
+
+- The extension must preserve its stable development ID through the committed public `key` in `extension/manifest.json`.
+- Do **not** remove or regenerate the public key casually — that changes the stable ID.
+- The private PEM key lives outside the repository at `$HOME/.config/vpn-route-inspector/chrome-extension.pem` (permissions 700/600). Never commit `*.pem` or `*.crx`.
+- `scripts/install-host.sh` must derive the extension ID automatically via `scripts/extension-id.sh`. Accept **no** manually supplied development IDs.
+- Native Messaging `allowed_origins` must contain **only** the single calculated stable project origin. No wildcards. No fallback origins.
+
 ## Native host security
 
 - Validate **all** input from Chrome before executing anything.
@@ -37,7 +45,7 @@ alwaysApply: true
 ## Secrets and local paths
 
 - Do not store secrets, credentials, cookies, or browsing history.
-- Do not commit generated extension IDs or `.extension-id` files.
+- Do not commit the Chrome extension private PEM key, generated extension ID files, or `.extension-id` files.
 - Do not commit machine-specific absolute paths.
 - Do not commit installed Native Messaging manifests under `~/Library/`.
 
@@ -56,5 +64,5 @@ alwaysApply: true
 
 ## Repository hygiene
 
-- Exclude `native-host/dist/`, `native-host/.build/`, local manifests, extension ID files, and `.DS_Store` via `.gitignore`.
+- Exclude `native-host/dist/`, `native-host/.build/`, local manifests, `*.pem`, `*.crx`, extension ID files, and `.DS_Store` via `.gitignore`.
 - Installation scripts use `$HOME` — never hardcode user home directories.

@@ -14,9 +14,9 @@ com.freemandan.vpn_route_inspector
 ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json
 ```
 
-Generated locally by `scripts/install-host.sh` — **never committed**.
+Generated locally by `scripts/install-host.sh` (ID from `scripts/extension-id.sh`) — **never committed**.
 
-Example structure:
+The installer takes **no** extension-ID argument. It derives the stable development ID from the committed public `key` in `extension/manifest.json`. `allowed_origins` contains exactly one origin — no wildcards and no manually pasted IDs:
 
 ```json
 {
@@ -25,10 +25,12 @@ Example structure:
   "path": "/absolute/path/to/vpn-route-host",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://<32-char-extension-id>/"
+    "chrome-extension://<stable-id-from-manifest-key>/"
   ]
 }
 ```
+
+The stable ID does **not** depend on the repository path. The private PEM key stays outside the repo (`$HOME/.config/vpn-route-inspector/chrome-extension.pem`) and must be backed up; never commit it.
 
 ## Binary framing protocol
 

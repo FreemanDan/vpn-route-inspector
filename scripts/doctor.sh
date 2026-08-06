@@ -108,6 +108,25 @@ else
 fi
 
 echo ""
+echo "Stable extension identity"
+EXPECTED_ID=""
+if EXPECTED_ID="$("${SCRIPT_DIR}/extension-id.sh")"; then
+  if [[ "${EXPECTED_ID}" =~ '^[a-p]{32}$' ]]; then
+    check_pass "stable extension ID from manifest key: ${EXPECTED_ID}"
+  else
+    check_fail "extension-id.sh returned an invalid ID: ${EXPECTED_ID}"
+    EXPECTED_ID=""
+  fi
+else
+  check_fail "could not derive stable extension ID (extension/manifest.json key)"
+  EXPECTED_ID=""
+fi
+EXPECTED_ORIGIN=""
+if [[ -n "${EXPECTED_ID}" ]]; then
+  EXPECTED_ORIGIN="chrome-extension://${EXPECTED_ID}/"
+fi
+
+echo ""
 echo "Native host installation"
 if [[ -f "${MANIFEST_PATH}" ]]; then
   # On macOS 15, `plutil -lint` falsely rejects valid JSON ("Unexpected character {").
@@ -139,9 +158,32 @@ if [[ -f "${MANIFEST_PATH}" ]]; then
     check_fail "installed executable missing or not executable: ${manifest_path:-<missing>}"
   fi
 
+  # Exactly one allowed origin, matching the stable project ID — no wildcards, no manual IDs.
   origin="$(plutil -extract allowed_origins.0 raw -o - "${MANIFEST_PATH}" 2>/dev/null || echo "")"
-  if [[ "${origin}" =~ '^chrome-extension://[a-p]{32}/$' ]]; then
-    check_pass "allowed_origins contains a valid extension origin"
+  # plutil prints an error on stdout/stderr when the key is absent; treat any failure as "no second entry".
+  second_origin=""
+  if second_origin="$(plutil -extract allowed_origins.1 raw -o - "${MANIFEST_PATH}" 2>/dev/null)"; then
+    :
+  else
+    second_origin=""
+  fi
+  if [[ -n "${second_origin}" ]]; then
+    check_fail "allowed_origins has an unexpected second entry: ${second_origin}"
+  else
+    check_pass "allowed_origins contains exactly one entry"
+  fi
+
+  if [[ -n "${EXPECTED_ORIGIN}" ]]; then
+    if [[ "${origin}" == "${EXPECTED_ORIGIN}" ]]; then
+      check_pass "allowed_origins.0 matches stable extension origin"
+      echo "       ${origin}"
+    else
+      check_fail "allowed_origins.0 mismatch"
+      echo "       expected: ${EXPECTED_ORIGIN}"
+      echo "       actual:   ${origin:-<missing>}"
+    fi
+  elif [[ "${origin}" =~ '^chrome-extension://[a-p]{32}/$' ]]; then
+    check_warn "allowed_origins looks valid but stable ID could not be calculated"
     echo "       ${origin}"
   else
     check_fail "allowed_origins is missing or invalid: ${origin:-<missing>}"
@@ -176,7 +218,7 @@ if [[ -f "${MANIFEST_PATH}" ]]; then
     check_warn "installed binary not present for runtime checks"
   fi
 else
-  check_warn "Native Messaging manifest not installed — run scripts/install-host.sh <extension-id>"
+  check_warn "Native Messaging manifest not installed — run ./scripts/install-host.sh or ./scripts/setup.sh"
 fi
 
 echo ""

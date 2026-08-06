@@ -1,32 +1,41 @@
 #!/bin/zsh
-# Install the native messaging host for a specific unpacked Chrome extension ID.
+# Install the native messaging host for this project's stable Chrome extension ID.
+# The ID is derived from extension/manifest.json "key" via scripts/extension-id.sh.
+# No positional arguments — do not pass a manually copied extension ID.
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <chrome-extension-id>" >&2
-  echo "  chrome-extension-id: exactly 32 lowercase a-p characters" >&2
+  echo "Usage: $0" >&2
+  echo "  Installs native-host/dist/vpn-route-host and a Native Messaging manifest" >&2
+  echo "  whose allowed_origins entry is derived from the committed extension key." >&2
+  echo "  Do not pass an extension ID argument." >&2
   exit 1
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -ne 0 ]]; then
   usage
-fi
-
-EXTENSION_ID="$1"
-
-# Chrome extension IDs use base16 letters a–p only (32 chars).
-if [[ ! "${EXTENSION_ID}" =~ '^[a-p]{32}$' ]]; then
-  echo "ERROR: Invalid extension ID. Expected exactly 32 lowercase a-p characters." >&2
-  exit 1
 fi
 
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 SOURCE_BINARY="${REPO_ROOT}/native-host/dist/vpn-route-host"
+ID_SCRIPT="${SCRIPT_DIR}/extension-id.sh"
 
 if [[ ! -f "${SOURCE_BINARY}" ]]; then
   echo "ERROR: Canonical binary not found at ${SOURCE_BINARY}" >&2
-  echo "Run ./scripts/build-host.sh first." >&2
+  echo "Run ./scripts/build-host.sh first (or ./scripts/setup.sh)." >&2
+  exit 1
+fi
+
+if [[ ! -x "${ID_SCRIPT}" ]]; then
+  echo "ERROR: Missing executable ${ID_SCRIPT}" >&2
+  exit 1
+fi
+
+# Stable development ID from the committed public key — never from chrome://extensions.
+EXTENSION_ID="$("${ID_SCRIPT}")"
+if [[ ! "${EXTENSION_ID}" =~ '^[a-p]{32}$' ]]; then
+  echo "ERROR: extension-id.sh returned an invalid ID: ${EXTENSION_ID}" >&2
   exit 1
 fi
 
@@ -48,6 +57,9 @@ cleanup() {
   [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]] && rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
+
+echo "==> Stable extension ID: ${EXTENSION_ID}"
+echo "==> Allowed origin: ${ALLOWED_ORIGIN}"
 
 echo "==> Creating install directories..."
 mkdir -p "${INSTALL_DIR}"
@@ -89,6 +101,7 @@ TMP_JSON="${TMP_DIR}/manifest.json"
   -c "Add :allowed_origins array" \
   "${TMP_PLIST}"
 
+# Exactly one origin — the stable project ID. No wildcards, no manual IDs.
 /usr/libexec/PlistBuddy \
   -c "Add :allowed_origins:0 string ${ALLOWED_ORIGIN}" \
   "${TMP_PLIST}"
@@ -106,6 +119,7 @@ TMP_MANIFEST=""
 
 echo ""
 echo "Installation complete."
-echo "  Binary:    ${INSTALL_BINARY}"
-echo "  Manifest:  ${MANIFEST_PATH}"
-echo "  Extension: ${ALLOWED_ORIGIN}"
+echo "  Stable extension ID: ${EXTENSION_ID}"
+echo "  Binary:              ${INSTALL_BINARY}"
+echo "  Manifest:            ${MANIFEST_PATH}"
+echo "  Allowed origin:      ${ALLOWED_ORIGIN}"

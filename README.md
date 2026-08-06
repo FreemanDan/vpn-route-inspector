@@ -37,12 +37,51 @@ Full Xcode is **not** required for this command-line project. Unit tests use **S
 
 No Node.js, npm, Python, or Homebrew dependencies are required for build, installation, diagnostics, or runtime.
 
-## Build the native host
+## Stable extension identity
+
+The extension has a committed public key in `extension/manifest.json` (`key`). That gives every clone the **same stable development extension ID**, independent of the repository path on disk.
+
+- The public key is committed.
+- The private PEM key lives **outside** the repository at:
+
+  `$HOME/.config/vpn-route-inspector/chrome-extension.pem`
+
+- **Back up that private key securely.** Never commit `*.pem` or `*.crx`.
+- Do not remove or regenerate the public `key` casually — that would change the stable ID and break Native Messaging until reinstall.
+
+## One-time setup
+
+```bash
+chmod +x scripts/*.sh
+./scripts/setup.sh
+```
+
+This runs `build-host.sh` → `install-host.sh` → `doctor.sh`, prints the stable extension ID, and prints the absolute `extension/` path to load in Chrome.
+
+Then load the unpacked extension **once**:
+
+1. Open Chrome and go to `chrome://extensions/`.
+2. Enable **Developer mode** (top right).
+3. Click **Load unpacked**.
+4. Select the `extension/` directory printed by `setup.sh` (the repository’s `extension/` folder).
+
+Fully quit Chrome with **Command+Q** and reopen it after the native host manifest is installed or changed.
+
+Manual pasting of an ID from `chrome://extensions` is not part of this workflow, and `install-host.sh` takes no ID argument.
+
+## Normal updates
+
+| What changed | What to do |
+|--------------|------------|
+| Extension JS/HTML/CSS | On `chrome://extensions`, click **Reload** for VPN Route Inspector |
+| Native host binary | Re-run `./scripts/setup.sh` (or `build-host.sh` + `install-host.sh`), then **Command+Q** Chrome |
+| Native Messaging manifest / allowed origin | Re-run `./scripts/install-host.sh` or `./scripts/setup.sh`, then **Command+Q** Chrome |
+
+## Build the native host only
 
 Swift Package Manager is the **only** supported build path. There is no fallback build. Unit tests run through SwiftPM via `swift test`. If `swift test` or `swift build -c release` fails, the build fails visibly.
 
 ```bash
-chmod +x scripts/*.sh
 ./scripts/build-host.sh
 ```
 
@@ -58,26 +97,16 @@ native-host/dist/vpn-route-host
 
 Install and doctor scripts use **only** that path.
 
-## Load the unpacked Chrome extension
-
-1. Open Chrome and go to `chrome://extensions/`.
-2. Enable **Developer mode** (top right).
-3. Click **Load unpacked**.
-4. Select the `extension/` directory from this repository.
-
-## Obtain the extension ID
-
-After loading the unpacked extension:
-
-1. On `chrome://extensions/`, find **VPN Route Inspector**.
-2. Copy the **ID** shown under the extension name (32 lowercase letters `a`–`p`).
-
-Do not commit this ID to the repository — it is machine-specific for unpacked extensions.
-
-## Install the native host
+## Install the native host only
 
 ```bash
-./scripts/install-host.sh <your-32-char-extension-id>
+./scripts/install-host.sh
+```
+
+No arguments. The installer derives the stable ID from `extension/manifest.json` via `scripts/extension-id.sh` and writes exactly one `allowed_origins` entry (no wildcards):
+
+```
+chrome-extension://<stable-id>/
 ```
 
 This installs:
@@ -85,15 +114,15 @@ This installs:
 - Binary: `~/Library/Application Support/VpnRouteInspector/vpn-route-host`
 - Manifest: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json`
 
-Restart Chrome completely (Command+Q, then reopen) after installation.
+Restart Chrome completely (Command+Q, then reopen) after installation or manifest changes.
 
 ## Test the extension
 
-Chrome Native Messaging is **not verified** until:
+Chrome Native Messaging is ready when:
 
-1. The unpacked extension ID is known,
-2. `./scripts/install-host.sh <extension-id>` has been run,
-3. Chrome has been fully restarted (Command+Q),
+1. `./scripts/setup.sh` (or build + install + doctor) has succeeded,
+2. The unpacked `extension/` directory is loaded in Chrome,
+3. Chrome has been fully restarted (Command+Q) after the latest native host install,
 4. The popup **Check route** test succeeds.
 
 Then:
@@ -110,7 +139,7 @@ Then:
 | VPN on, IP not excluded | `utun4` (or similar) | `VPN` |
 | VPN on, IP excluded     | `en0`             | `DIRECT`   |
 
-Run `./scripts/doctor.sh` if native messaging fails.
+Run `./scripts/doctor.sh` if native messaging fails. Doctor verifies that the installed `allowed_origins` matches the stable ID from the committed key.
 
 ## Uninstall
 
@@ -123,9 +152,9 @@ Remove the extension from `chrome://extensions/` manually if desired.
 ## Project layout
 
 ```
-extension/          Chrome MV3 extension (plain JS/HTML/CSS)
+extension/          Chrome MV3 extension (plain JS/HTML/CSS; committed public key)
 native-host/        Swift native messaging host (SwiftPM)
-scripts/            build, install, uninstall, doctor
+scripts/            setup, build, install, uninstall, doctor, extension-id
 docs/               architecture and milestone documentation
 ```
 

@@ -20,10 +20,19 @@ native-host/.swiftpm/
 # Local generated Native Messaging manifests (installed per-machine)
 **/NativeMessagingHosts/com.freemandan.vpn_route_inspector.json
 
-# Extension ID files (machine-specific)
+# Extension ID files (obsolete machine-specific flow — do not reintroduce)
 .extension-id
 extension-id.txt
 *.extension-id
+
+# Chrome extension signing keys and packages — private key must never be committed.
+# The private PEM lives outside the repo at $HOME/.config/vpn-route-inspector/
+*.pem
+*.crx
+.keys/
+.key/
+chrome-extension.pem
+vpn-route-inspector-keys/
 
 # Logs and diagnostics
 *.log
