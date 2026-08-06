@@ -42,9 +42,20 @@ alwaysApply: true
 - **stdout** is reserved exclusively for Chrome Native Messaging framed JSON.
 - All logs and diagnostics go to **stderr**.
 
+## Capture / webRequest (Milestone 2+)
+
+- `webRequest` observation is **non-blocking**. Never add `webRequestBlocking`.
+- Broad HTTP/HTTPS host access must remain **optional** (`optional_host_permissions`) and requested only after an explicit user gesture.
+- Do **not** add permanent `host_permissions` with `<all_urls>`.
+- Capture only the explicitly selected numeric tab ID. Ignore other tabs.
+- Store captures **only** in `chrome.storage.session` (not `local` / `sync`). Bound entries to a documented maximum (currently 500).
+- Never collect request/response bodies, cookies, authorization headers, or full request/response headers.
+- Do **not** route-check every event directly from a webRequest listener. Automatic VPN/DIRECT classification of captured IPs belongs to a later milestone.
+- Preserve the stable extension `key`.
+
 ## Secrets and local paths
 
-- Do not store secrets, credentials, cookies, or browsing history.
+- Do not store secrets, credentials, cookies, or browsing history in the repository or native host.
 - Do not commit the Chrome extension private PEM key, generated extension ID files, or `.extension-id` files.
 - Do not commit machine-specific absolute paths.
 - Do not commit installed Native Messaging manifests under `~/Library/`.
@@ -52,15 +63,14 @@ alwaysApply: true
 ## Chrome extension permissions
 
 - Minimize permissions for each milestone.
-- Do **not** add `<all_urls>` or `webRequest` until active-tab request capture actually requires them.
 - `declarativeNetRequest` is not a substitute for `webRequest` when the goal is observing actual request metadata and remote IP information.
+- Do not use content scripts for Milestone 2 capture.
 
 ## Milestone discipline
 
 - Keep every milestone **independently testable** before starting the next.
 - Separate testable core logic (validation, parsing, classification, framing) from I/O and `Process` execution.
 - Do not expose raw `/sbin/route` output to the popup unless needed for diagnostics.
-- Milestone 1 does not capture browser traffic.
 
 ## Repository hygiene
 

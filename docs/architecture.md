@@ -1,8 +1,11 @@
 # Architecture
 
-VPN Route Inspector is a local diagnostic stack composed of a Chrome extension and a macOS native host. Milestone 1 implements manual IPv4 route lookup only.
+VPN Route Inspector is a local diagnostic stack composed of a Chrome extension and a macOS native host.
 
-## High-level flow (Milestone 1)
+- **Milestone 1 (complete):** manual IPv4 route lookup via Native Messaging.
+- **Milestone 2 (current):** user-controlled response capture for one HTTP/HTTPS tab via non-blocking `webRequest`. Captured IPs are **not** auto route-checked yet.
+
+## High-level flow (Milestone 1 — manual route check)
 
 ```mermaid
 sequenceDiagram
@@ -23,17 +26,57 @@ sequenceDiagram
     Popup->>Popup: render result
 ```
 
+## High-level flow (Milestone 2 — active-tab capture)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Popup as Extension Popup
+    participant SW as Service Worker
+    participant WR as chrome.webRequest
+    participant Store as storage.session
+
+    User->>Popup: Start capture and reload
+    Popup->>Popup: permissions.request(http/https)
+    Popup->>SW: CAPTURE_START(tabId, url)
+    SW->>Store: active session for tabId
+    SW->>SW: tabs.reload(tabId)
+    WR-->>SW: onResponseStarted / redirect / error
+    SW->>Store: append entry (max 500)
+    User->>Popup: reopen popup
+    Popup->>SW: CAPTURE_GET_STATE
+    SW->>Popup: session + summary
+```
+
 ## Components
 
 ### Extension popup (`extension/popup/`)
 
-Plain HTML/CSS/JavaScript UI. Collects an IPv4 address, shows loading state, and displays structured success or error results. Does not call Native Messaging directly — it only talks to the service worker.
+Plain HTML/CSS/JavaScript UI with two sections:
+
+1. **Manual route check** — IPv4 input → service worker → native host (Milestone 1).
+2. **Active tab capture** — start/stop/clear/revoke; renders session metadata and a scrollable result list (Milestone 2).
+
+The popup never calls Native Messaging directly. Capture rows are built with `createElement` / `textContent` (no unrestricted `innerHTML` of captured strings).
+
+Optional HTTP/HTTPS host access is requested **only** from the **Start capture and reload** click handler so the prompt stays tied to a user gesture. Opening the popup does not request permissions. `activeTab` alone does **not** expose all cross-origin subresources; optional host access is required for CDN/API observation.
 
 ### Manifest V3 service worker (`extension/service-worker.js`)
 
-Background script registered in `manifest.json`. Receives internal messages from the popup, generates a `requestId`, and calls `chrome.runtime.sendNativeMessage` with host name `com.freemandan.vpn_route_inspector`.
+Background script registered in `manifest.json`. Responsibilities:
 
-Milestone 1 permissions are limited to `nativeMessaging` only.
+| Action | Purpose |
+|--------|---------|
+| `CHECK_ROUTE` | Forward IPv4 lookup to the native host (unchanged) |
+| `CAPTURE_GET_STATE` | Return session + counters |
+| `CAPTURE_START` | Bind to one validated tab, then reload it |
+| `CAPTURE_STOP` | Stop appending entries |
+| `CAPTURE_CLEAR` | Clear entries |
+| `CAPTURE_REVOKE_HOSTS` | Stop, clear, remove optional origins |
+
+`webRequest` listeners (`onResponseStarted`, `onBeforeRedirect`, `onErrorOccurred`) are registered **synchronously at top level**. They filter on the stored numeric tab ID. The remote IP is Chrome’s `details.ip` when present — **not** DNS. IP may be missing or IPv6.
+
+Capture sessions are stored only in `chrome.storage.session` (schemaVersion 1, max **500** entries, oldest evicted). Storage updates are serialized through a Promise queue. Data is not persisted across browser/extension restarts and is not exposed to content scripts (none are used).
 
 ### Native Messaging boundary
 
@@ -42,7 +85,7 @@ Chrome launches the native host as a child process and communicates over stdin/s
 1. 4-byte little-endian message length
 2. UTF-8 JSON payload
 
-See [native-messaging.md](native-messaging.md) for message schemas.
+See [native-messaging.md](native-messaging.md) for message schemas. Milestone 2 does **not** change framing or the Swift API.
 
 **Security boundary:** only the single stable extension origin listed in the installed manifest's `allowed_origins` may invoke the host (derived from the committed `key` in `extension/manifest.json` — no wildcards). The host validates all input before executing system commands.
 
@@ -91,25 +134,25 @@ Classification rules:
 | `en`, `bridge`, `pdp_ip` | `DIRECT` |
 | other            | `UNKNOWN`  |
 
-## Security boundaries
+## Security and privacy boundaries
 
 1. **Input validation** — only validated IPv4 addresses reach `/sbin/route`.
 2. **No shell execution** — no `/bin/sh -c`, `system()`, or string-built commands.
-3. **Origin allowlist** — installed manifest restricts connection to the single stable project extension ID (from the committed public key). No wildcards. Private PEM is outside the repository.
-4. **Minimal Chrome permissions** — no `<all_urls>` or `webRequest` until request capture is implemented.
-5. **No secrets** — the tool does not store credentials, cookies, or browsing history. Do not commit the Chrome extension private PEM.
+3. **Origin allowlist** — installed Native Messaging manifest restricts connection to the single stable project extension ID. No wildcards. Private PEM is outside the repository.
+4. **Optional host access** — HTTP/HTTPS observation uses `optional_host_permissions` only; requested after explicit user action. No permanent `host_permissions` / `<all_urls>`. No `webRequestBlocking`.
+5. **Capture scope** — one selected tab ID; metadata only (no bodies, headers, cookies, authorization). URLs may still contain path/query data — capture is for intentional diagnostics.
+6. **Session memory only** — captures live in `chrome.storage.session` and clear on browser/extension restart. Nothing is sent outside the local extension except the existing manual native route-check path.
+7. **Stable key** — do not remove or regenerate the committed extension public `key`.
 
-## Future request-capture flow (not implemented)
+## Future flow (batch route checks — not implemented)
 
-Later milestones will add `webRequest` (or an equivalent that exposes actual request metadata and remote IP information) to observe requests from the active tab. `declarativeNetRequest` alone is **not** a substitute when the goal is collecting the actual remote IP Chrome connected to.
+Later milestones will classify captured IPs via the native host in batch. `declarativeNetRequest` alone is **not** a substitute when the goal is collecting the actual remote IP Chrome connected to. Do **not** call the native host from every webRequest listener.
 
 ```mermaid
 flowchart LR
-    A[Active tab requests] --> B[Extension capture layer]
-    B --> C[Remote IP extraction]
-    C --> D[Native host route checks]
-    D --> E[Domain/IP grouping UI]
-    E --> F[Export exclusions]
+    A[Active tab capture] --> B[Hostname / IP grouping]
+    B --> C[Batch native host route checks]
+    C --> D[Export VPN-routed IPs]
 ```
 
 Each milestone remains independently testable before the next layer is added.

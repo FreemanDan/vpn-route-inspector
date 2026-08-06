@@ -14,17 +14,26 @@ When a VPN client uses split tunneling, only some traffic is routed through the 
 
 VPN Route Inspector helps you see **which macOS interface actually routes a given IP** so you can prepare accurate VPN exclusion lists.
 
-## Current milestone scope (Milestone 1)
+## Current milestone scope
 
-Manual IPv4 route check only:
+**Milestone 1 (complete):** manual IPv4 route check via Native Messaging.
+
+**Milestone 2 (current):** user-controlled capture of network **responses** for one active HTTP/HTTPS tab.
 
 ```
-Chrome popup → service worker → Native Messaging → Swift host → /sbin/route → JSON → popup
+Chrome popup → service worker → chrome.webRequest (one tab)
+                              ↘ chrome.storage.session (metadata only)
+
+Chrome popup → service worker → Native Messaging → Swift host → /sbin/route
 ```
 
-**Not yet implemented:** browser request interception, `webRequest`, `<all_urls>`, or DNS inspection.
+Remote IPs come from Chrome `webRequest` response metadata (`details.ip`), **not** from DNS. The IP may be missing or IPv6. Cross-origin subresources require optional HTTP/HTTPS host access, requested only after you click **Start capture and reload**. `activeTab` alone is not enough for all CDN/API traffic.
 
-Milestone 1 does **not** capture browser traffic. After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) before trusting new results.
+Captured metadata stays in `chrome.storage.session` (max 500 entries) and is cleared when the browser or extension restarts. Bodies, headers, cookies, and authorization values are **not** captured. URLs may still contain path/query data — use capture only for intentional diagnostics.
+
+Automatic VPN/DIRECT classification of captured IPs is **not** in this milestone (comes later). The stable extension `key` / ID must remain unchanged.
+
+After VPN route changes, reconnect the VPN and fully restart Chrome (Command+Q) before trusting new manual route-check results.
 
 ## Prerequisites
 
@@ -49,6 +58,12 @@ The extension has a committed public key in `extension/manifest.json` (`key`). T
 - **Back up that private key securely.** Never commit `*.pem` or `*.crx`.
 - Do not remove or regenerate the public `key` casually — that would change the stable ID and break Native Messaging until reinstall.
 
+Expected stable ID:
+
+```
+iipnohegjdidiffjfhlccfbpbjeeicba
+```
+
 ## One-time setup
 
 ```bash
@@ -58,12 +73,13 @@ chmod +x scripts/*.sh
 
 This runs `build-host.sh` → `install-host.sh` → `doctor.sh`, prints the stable extension ID, and prints the absolute `extension/` path to load in Chrome.
 
-Then load the unpacked extension **once**:
+Then load the unpacked extension **once** (or **Reload** it on `chrome://extensions` after extension source updates):
 
 1. Open Chrome and go to `chrome://extensions/`.
 2. Enable **Developer mode** (top right).
-3. Click **Load unpacked**.
-4. Select the `extension/` directory printed by `setup.sh` (the repository’s `extension/` folder).
+3. Click **Load unpacked** (first time) or **Reload**.
+4. Select / confirm the repository’s `extension/` folder.
+5. Confirm the ID is still `iipnohegjdidiffjfhlccfbpbjeeicba`.
 
 Fully quit Chrome with **Command+Q** and reopen it after the native host manifest is installed or changed.
 
@@ -76,6 +92,18 @@ Manual pasting of an ID from `chrome://extensions` is not part of this workflow,
 | Extension JS/HTML/CSS | On `chrome://extensions`, click **Reload** for VPN Route Inspector |
 | Native host binary | Re-run `./scripts/setup.sh` (or `build-host.sh` + `install-host.sh`), then **Command+Q** Chrome |
 | Native Messaging manifest / allowed origin | Re-run `./scripts/install-host.sh` or `./scripts/setup.sh`, then **Command+Q** Chrome |
+
+## Active tab capture (Milestone 2)
+
+1. Open a normal `http:` / `https:` page (for example Wildberries, Ozon, or Yandex Market).
+2. Open the extension popup.
+3. Click **Start capture and reload**.
+4. Accept the optional host-access prompt if Chrome shows it.
+5. After the tab reloads, reopen the popup.
+6. Inspect hostname, remote IP (when Chrome provides it), status, resource type, method, and CACHE markers.
+7. Use **Stop capture**, **Clear results**, or **Revoke network access** as needed.
+
+Requests from other tabs must not appear. Manual **Check route** remains available in the same popup.
 
 ## Build the native host only
 
@@ -116,7 +144,7 @@ This installs:
 
 Restart Chrome completely (Command+Q, then reopen) after installation or manifest changes.
 
-## Test the extension
+## Manual route check
 
 Chrome Native Messaging is ready when:
 

@@ -138,3 +138,7 @@ native-host/dist/vpn-route-host
 ```
 
 There is no alternate manual build path. Framing encode/decode is covered by Swift Testing unit tests under `native-host/Tests/` and executed with `swift test` (SwiftPM only — no XCTest, no fallback runner).
+
+## Milestone 2 note
+
+Active-tab capture uses `chrome.webRequest` and `chrome.storage.session` inside the extension only. It does **not** change this Native Messaging protocol, the Swift `checkRoute` API, or send captured IPs to the native host. Automatic route classification of captured addresses is a later milestone.
