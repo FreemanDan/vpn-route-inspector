@@ -135,4 +135,4 @@ The installed binary comes from the canonical SwiftPM output copied by `./script
 native-host/dist/vpn-route-host
 ```
 
-There is no alternate manual build path.
+There is no alternate manual build path. Framing encode/decode is covered by Swift Testing unit tests under `native-host/Tests/` and executed with `swift test` (SwiftPM only — no XCTest, no fallback runner).

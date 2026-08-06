@@ -12,7 +12,7 @@ echo "==> Removing previous dist output..."
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
-echo "==> Running Swift tests..."
+echo "==> Running Swift Testing suite via SwiftPM (swift test)..."
 ( cd "${HOST_DIR}" && swift test )
 
 echo ""

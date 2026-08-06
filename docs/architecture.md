@@ -63,6 +63,16 @@ All diagnostics and logs go to **stderr**. **stdout** is reserved exclusively fo
 
 The canonical release artifact is `native-host/dist/vpn-route-host`, produced only by SwiftPM via `./scripts/build-host.sh`.
 
+### Testing
+
+Unit tests live under `native-host/Tests/` and use **Swift Testing** (`import Testing`) supplied by the Swift 6.1+ toolchain. They run only through SwiftPM:
+
+```bash
+cd native-host && swift test
+```
+
+Full Xcode is not required; Xcode Command Line Tools with Swift 6.1 or newer are sufficient. There is no XCTest dependency and no fallback test runner. A failed test makes the build fail visibly (`./scripts/build-host.sh` runs `swift test` before the release build). Minimum supported platform is macOS 13.
+
 ### Route lookup
 
 The host executes:

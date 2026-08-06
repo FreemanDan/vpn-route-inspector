@@ -1,7 +1,7 @@
 import Foundation
 
 /// Chrome Native Messaging length-prefix framing (little-endian UInt32).
-/// Pure encode/decode logic lives here so XCTest can cover boundaries without a live host process.
+/// Pure encode/decode logic lives here so Swift Testing can cover boundaries without a live host process.
 public enum NativeMessagingFraming {
     /// Maximum accepted message payload size (1 MiB).
     public static let maxMessageSize: UInt32 = 1_048_576

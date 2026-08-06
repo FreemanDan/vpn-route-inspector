@@ -28,16 +28,18 @@ Milestone 1 does **not** capture browser traffic. After VPN route changes, recon
 
 ## Prerequisites
 
-- macOS 13 or later
-- Xcode or Xcode Command Line Tools (provides Swift Package Manager)
+- macOS 13 or later (minimum supported platform)
+- Xcode Command Line Tools with **Swift 6.1 or newer** (Swift Package Manager + Swift Testing)
 - Google Chrome
 - An active network connection
+
+Full Xcode is **not** required for this command-line project. Unit tests use **Swift Testing** (the `Testing` module from the toolchain), not XCTest. There is no XCTest dependency and no fallback test runner.
 
 No Node.js, npm, Python, or Homebrew dependencies are required for build, installation, diagnostics, or runtime.
 
 ## Build the native host
 
-Swift Package Manager is the **only** supported build path. There is no fallback build. If `swift test` or `swift build -c release` fails, the build fails visibly.
+Swift Package Manager is the **only** supported build path. There is no fallback build. Unit tests run through SwiftPM via `swift test`. If `swift test` or `swift build -c release` fails, the build fails visibly.
 
 ```bash
 chmod +x scripts/*.sh
@@ -46,7 +48,7 @@ chmod +x scripts/*.sh
 
 The script runs:
 
-1. `swift test`
+1. `swift test` (Swift Testing via SwiftPM — one test path only)
 2. `swift build -c release`
 3. Copies the release executable to the canonical artifact:
 

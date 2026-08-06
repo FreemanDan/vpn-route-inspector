@@ -17,7 +17,10 @@ alwaysApply: true
 ## Build system
 
 - **Swift Package Manager is the only supported build path.**
-- There is **no fallback build**, manual `swiftc` pipeline, VFS overlay, or parallel test runner.
+- There is **no fallback build**, manual `swiftc` pipeline, VFS overlay, or parallel / manual test runner.
+- Unit tests use **Swift Testing** (`import Testing` from the Swift 6.1+ toolchain) via a normal SwiftPM `.testTarget` and `swift test`.
+- There is **no XCTest** dependency. Full Xcode is **not** required; Xcode Command Line Tools with Swift 6.1 or newer are sufficient.
+- Minimum supported platform is **macOS 13**.
 - If `swift test` or `swift build -c release` fails, the build **must fail visibly**.
 - Do not introduce fallback build systems or silently bypass failed tests. Fix the supported build path or report the blocker.
 - The canonical distributable artifact is `native-host/dist/vpn-route-host`.
