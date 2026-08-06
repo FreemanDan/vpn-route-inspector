@@ -36,15 +36,16 @@ MANIFEST_DIR="${HOME}/Library/Application Support/Google/Chrome/NativeMessagingH
 MANIFEST_PATH="${MANIFEST_DIR}/com.freemandan.vpn_route_inspector.json"
 ALLOWED_ORIGIN="chrome-extension://${EXTENSION_ID}/"
 
-TMP_PLIST=""
-TMP_JSON=""
+# Temporary install artifacts. Manifest plist/json live under TMP_DIR so mktemp
+# templates can end in XXXXXX (required on macOS) and so empty mktemp files are
+# never passed to PlistBuddy before they are initialized as a real plist.
+TMP_DIR=""
 TMP_BINARY=""
 TMP_MANIFEST=""
 cleanup() {
-  [[ -n "${TMP_PLIST}" && -f "${TMP_PLIST}" ]] && rm -f "${TMP_PLIST}"
-  [[ -n "${TMP_JSON}" && -f "${TMP_JSON}" ]] && rm -f "${TMP_JSON}"
   [[ -n "${TMP_BINARY}" && -f "${TMP_BINARY}" ]] && rm -f "${TMP_BINARY}"
   [[ -n "${TMP_MANIFEST}" && -f "${TMP_MANIFEST}" ]] && rm -f "${TMP_MANIFEST}"
+  [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]] && rm -rf "${TMP_DIR}"
 }
 trap cleanup EXIT
 
@@ -60,18 +61,43 @@ mv -f "${TMP_BINARY}" "${INSTALL_BINARY}"
 TMP_BINARY=""
 
 echo "==> Generating Native Messaging manifest..."
-TMP_PLIST="$(mktemp "${TMPDIR:-/tmp}/vpn-route-inspector-manifest.XXXXXX.plist")"
-TMP_JSON="$(mktemp "${TMPDIR:-/tmp}/vpn-route-inspector-manifest.XXXXXX.json")"
 
-/usr/libexec/PlistBuddy -c "Add :name string com.freemandan.vpn_route_inspector" "${TMP_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :description string VPN Route Inspector native host for macOS route lookups" "${TMP_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :path string ${INSTALL_BINARY}" "${TMP_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :type string stdio" "${TMP_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :allowed_origins array" "${TMP_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :allowed_origins:0 string ${ALLOWED_ORIGIN}" "${TMP_PLIST}"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vpn-route-inspector.XXXXXX")"
+TMP_PLIST="${TMP_DIR}/manifest.plist"
+TMP_JSON="${TMP_DIR}/manifest.json"
 
-plutil -convert json -o "${TMP_JSON}" "${TMP_PLIST}"
-plutil -lint "${TMP_JSON}" >/dev/null
+# PlistBuddy cannot Add keys into a zero-length file; create a valid empty plist first.
+/usr/bin/plutil -create xml1 "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :name string com.freemandan.vpn_route_inspector" \
+  "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :description string VPN Route Inspector native host for macOS route lookups" \
+  "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :path string ${INSTALL_BINARY}" \
+  "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :type string stdio" \
+  "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :allowed_origins array" \
+  "${TMP_PLIST}"
+
+/usr/libexec/PlistBuddy \
+  -c "Add :allowed_origins:0 string ${ALLOWED_ORIGIN}" \
+  "${TMP_PLIST}"
+
+/usr/bin/plutil -convert json -o "${TMP_JSON}" "${TMP_PLIST}"
+# Validate structure on the XML plist. On macOS 15, `plutil -lint` falsely rejects
+# valid JSON ("Unexpected character {"), so confirm the JSON by round-tripping it.
+/usr/bin/plutil -lint "${TMP_PLIST}" >/dev/null
+/usr/bin/plutil -convert xml1 -o /dev/null "${TMP_JSON}"
 
 TMP_MANIFEST="$(mktemp "${MANIFEST_DIR}/.com.freemandan.vpn_route_inspector.json.XXXXXX")"
 cp "${TMP_JSON}" "${TMP_MANIFEST}"

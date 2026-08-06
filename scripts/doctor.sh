@@ -88,8 +88,10 @@ if [[ -f "${DIST_BINARY}" && -x "${DIST_BINARY}" ]]; then
   forbidden_dep=0
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
-    dep="${line//[$'\t ']/}"
-    dep="${dep%% (*}"
+    # Strip leading whitespace, then drop the " (compatibility ...)" suffix.
+    # Use "%% *" (not "%% (*") — unescaped "(" is a bad zsh glob pattern.
+    dep="${line##[[:space:]]#}"
+    dep="${dep%% *}"
     case "${dep}" in
       @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*) continue ;;
     esac
@@ -108,7 +110,9 @@ fi
 echo ""
 echo "Native host installation"
 if [[ -f "${MANIFEST_PATH}" ]]; then
-  if plutil -lint "${MANIFEST_PATH}" >/dev/null 2>&1; then
+  # On macOS 15, `plutil -lint` falsely rejects valid JSON ("Unexpected character {").
+  # Round-trip through plutil instead to confirm the manifest is readable property-list JSON.
+  if plutil -convert xml1 -o /dev/null "${MANIFEST_PATH}" 2>/dev/null; then
     check_pass "Native Messaging manifest is valid JSON/plist: ${MANIFEST_PATH}"
   else
     check_fail "Native Messaging manifest is malformed: ${MANIFEST_PATH}"
@@ -154,8 +158,9 @@ if [[ -f "${MANIFEST_PATH}" ]]; then
     forbidden_installed=0
     while IFS= read -r line; do
       [[ -z "${line}" ]] && continue
-      dep="${line//[$'\t ']/}"
-      dep="${dep%% (*}"
+      # Same otool suffix trim as above — avoid unescaped "(" in zsh patterns.
+      dep="${line##[[:space:]]#}"
+      dep="${dep%% *}"
       case "${dep}" in
         @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*) continue ;;
       esac

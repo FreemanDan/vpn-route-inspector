@@ -45,8 +45,10 @@ echo "==> Checking dynamic library dependencies..."
 FORBIDDEN=0
 while IFS= read -r line; do
   [[ -z "${line}" ]] && continue
-  dep="${line//[$'\t ']/}"
-  dep="${dep%% (*}"
+  # Strip leading whitespace, then drop the " (compatibility ...)" suffix.
+  # Use "%% *" (not "%% (*") — unescaped "(" is a bad zsh glob pattern.
+  dep="${line##[[:space:]]#}"
+  dep="${dep%% *}"
 
   case "${dep}" in
     @executable_path/*|@loader_path/*|/usr/lib/*|/System/*|/usr/lib/swift/*)
